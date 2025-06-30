@@ -440,7 +440,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - 🐛 **Bug Reports**: [GitHub Issues](https://github.com/your-org/aws-api-gateway-scanner/issues)
 - 💡 **Feature Requests**: [GitHub Discussions](https://github.com/your-org/aws-api-gateway-scanner/discussions)
-- 📧 **Security Issues**: security@yourorg.com
+- 📧 **Security Issues**: [Security Issues](https://github.com/your-org/aws-api-gateway-scanner/issues)
 - 📖 **Documentation**: [Wiki](https://github.com/your-org/aws-api-gateway-scanner/wiki)
 
 ---
