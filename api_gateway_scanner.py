@@ -26,10 +26,11 @@ except ImportError:
 
 class APIGatewayScanner:
     def __init__(self, access_key: Optional[str] = None, secret_key: Optional[str] = None, 
-                 session_token: Optional[str] = None, profile: Optional[str] = None):
+                 session_token: Optional[str] = None, profile: Optional[str] = None, verbose: bool = False):
         """Initialize the scanner with AWS credentials."""
         self.console = Console() if RICH_AVAILABLE else None
         self.results = []
+        self.verbose = verbose
         
         # Setup AWS session
         if profile:
@@ -126,18 +127,31 @@ class APIGatewayScanner:
         """Scan a specific region for API Gateway misconfigurations."""
         region_results = []
         
+        if self.verbose:
+            self._log_info(f"Starting scan of region: {region}")
+        
         try:
             # Scan API Gateway v1 (REST APIs)
             apigw_client = self.session.client('apigateway', region_name=region)
             
+            if self.verbose:
+                self._log_info(f"Connected to API Gateway service in {region}")
+            
             # Get all REST APIs
             rest_apis = apigw_client.get_rest_apis()
+            api_count = len(rest_apis.get('items', []))
             
-            for api in rest_apis.get('items', []):
+            if self.verbose:
+                self._log_info(f"Found {api_count} REST APIs in {region}")
+            
+            for i, api in enumerate(rest_apis.get('items', []), 1):
                 api_id = api['id']
                 api_name = api.get('name', 'Unknown')
                 endpoint_config = api.get('endpointConfiguration', {})
                 endpoint_types = endpoint_config.get('types', [])
+                
+                if self.verbose:
+                    self._log_info(f"Analyzing API {i}/{api_count}: {api_name} ({api_id}) - Types: {endpoint_types}")
                 
                 result = {
                     'region': region,
@@ -153,25 +167,69 @@ class APIGatewayScanner:
                 # Check if it's a private API
                 if 'PRIVATE' in endpoint_types:
                     try:
-                        # Get resource policy
-                        policy_response = apigw_client.get_rest_api(
-                            restApiId=api_id,
-                            embed=['policy']
-                        )
+                        # First try to get the resource policy directly
+                        try:
+                            policy_response = apigw_client.get_rest_api(restApiId=api_id)
+                            policy_document = policy_response.get('policy')
+                        except Exception as policy_error:
+                            if self.verbose:
+                                self._log_info(f"Direct policy retrieval failed for {api_id}, trying alternative method: {str(policy_error)}")
+                            
+                            # Alternative method - some APIs store policy differently
+                            try:
+                                # Try getting the API details without embed
+                                api_details = apigw_client.get_rest_api(restApiId=api_id)
+                                policy_document = api_details.get('policy')
+                                
+                                if not policy_document:
+                                    # Check if there's a separate resource policy endpoint
+                                    try:
+                                        # This might not exist for all APIs, but worth trying
+                                        policy_response = apigw_client.get_resource_policy(restApiId=api_id)
+                                        policy_document = policy_response.get('policy')
+                                    except apigw_client.exceptions.NotFoundException:
+                                        if self.verbose:
+                                            self._log_info(f"No resource policy found for private API {api_id}")
+                                        policy_document = None
+                                    except Exception as inner_error:
+                                        if self.verbose:
+                                            self._log_info(f"Resource policy endpoint not available for {api_id}: {str(inner_error)}")
+                                        policy_document = None
+                                        
+                            except Exception as alt_error:
+                                if self.verbose:
+                                    self._log_error(f"Alternative policy retrieval failed for {api_id}: {str(alt_error)}")
+                                policy_document = None
                         
-                        policy_document = policy_response.get('policy')
                         if policy_document:
                             result['policy_document'] = policy_document
                             policy_analysis = self.check_api_gateway_policy(policy_document)
                             result['status'] = policy_analysis['risk_level']
                             result['issues'] = policy_analysis['issues']
+                            
+                            if self.verbose:
+                                self._log_info(f"Policy analysis for {api_id}: {policy_analysis['risk_level']} - {len(policy_analysis['issues'])} issues found")
                         else:
                             result['status'] = 'NO_POLICY'
-                            result['issues'] = ['No resource policy found for private API']
+                            result['issues'] = ['No resource policy found for private API - this may be a security risk']
                             
+                            if self.verbose:
+                                self._log_warning(f"Private API {api_id} ({api_name}) has no resource policy")
+                                
                     except Exception as e:
+                        error_msg = str(e)
                         result['status'] = 'ERROR'
-                        result['issues'] = [f'Error checking policy: {str(e)}']
+                        result['issues'] = [f'Error checking policy: {error_msg}']
+                        
+                        if self.verbose:
+                            self._log_error(f"Failed to analyze private API {api_id} ({api_name}): {error_msg}")
+                            # Add more specific error information
+                            if "Parameter validation failed" in error_msg:
+                                self._log_error(f"This might be due to API Gateway version compatibility or insufficient permissions")
+                            elif "AccessDenied" in error_msg:
+                                self._log_error(f"Insufficient permissions to read API Gateway policy for {api_id}")
+                            elif "NotFound" in error_msg:
+                                self._log_error(f"API Gateway {api_id} not found or no longer exists")
                 
                 region_results.append(result)
             
@@ -343,6 +401,30 @@ class APIGatewayScanner:
         else:
             print(f"ERROR: {message}")
 
+    def _log_info(self, message: str):
+        """Log info message."""
+        if self.verbose:
+            if RICH_AVAILABLE:
+                self.console.print(f"[blue]INFO: {message}[/blue]")
+            else:
+                print(f"INFO: {message}")
+
+    def _log_warning(self, message: str):
+        """Log warning message."""
+        if self.verbose:
+            if RICH_AVAILABLE:
+                self.console.print(f"[yellow]WARNING: {message}[/yellow]")
+            else:
+                print(f"WARNING: {message}")
+
+    def _log_debug(self, message: str):
+        """Log debug message."""
+        if self.verbose:
+            if RICH_AVAILABLE:
+                self.console.print(f"[dim]DEBUG: {message}[/dim]")
+            else:
+                print(f"DEBUG: {message}")
+
 def main():
     parser = argparse.ArgumentParser(
         description="AWS Private API Gateway Misconfiguration Scanner",
@@ -388,7 +470,8 @@ Examples:
             access_key=args.access_key,
             secret_key=args.secret_key,
             session_token=args.session_token,
-            profile=args.profile
+            profile=args.profile,
+            verbose=args.verbose
         )
         
         # Parse regions
