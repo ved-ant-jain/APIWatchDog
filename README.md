@@ -552,10 +552,10 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📞 Support
 
-- 🐛 **Bug Reports**: [GitHub Issues](https://github.com/your-org/aws-api-gateway-scanner/issues)
-- 💡 **Feature Requests**: [GitHub Discussions](https://github.com/your-org/aws-api-gateway-scanner/discussions)
-- 📧 **Security Issues**: security@yourorg.com
-- 📖 **Documentation**: [Wiki](https://github.com/your-org/aws-api-gateway-scanner/wiki)
+- 🐛 **Bug Reports**: [GitHub Issues](https://github.com/ved-ant-jain/aws-api-gateway-scanner/issues)
+- 💡 **Feature Requests**: [GitHub Discussions](https://github.com/ved-ant-jain/aws-api-gateway-scanner/discussions)
+- 📧 **Security Issues**: [Security Issues](https://github.com/ved-ant-jain/aws-api-gateway-scanner/issues)
+- 📖 **Documentation**: [Wiki](https://github.com/ved-ant-jain/aws-api-gateway-scanner/wiki)
 
 ---
 
