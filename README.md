@@ -19,6 +19,7 @@ A comprehensive Python CLI tool designed to identify and assess security misconf
 - [Quick Start](#quick-start)
 - [Usage](#usage)
 - [Authentication](#authentication)
+- [Verbose Mode & Debugging](#verbose-mode--debugging)
 - [Output Formats](#output-formats)
 - [Risk Assessment](#risk-assessment)
 - [Examples](#examples)
@@ -36,6 +37,8 @@ This tool addresses a critical but often overlooked AWS security vulnerability w
 - ✅ Scans all AWS regions for API Gateway endpoints
 - ✅ Identifies Private API Gateways with overly permissive policies
 - ✅ Analyzes resource-based policies for security issues
+- ✅ Provides detailed verbose logging for troubleshooting
+- ✅ Handles multiple policy retrieval methods for compatibility
 - ✅ Provides risk assessment and remediation guidance
 - ✅ Exports findings in multiple formats (JSON, CSV)
 - ✅ Supports all AWS authentication methods
@@ -79,6 +82,12 @@ Private API Gateways are designed to be accessible only from within specific VPC
 - IAM roles and cross-account access
 - Environment variables and credential files
 
+### 🔍 Enhanced Debugging & Verbose Mode
+- **Detailed Logging**: Step-by-step scan progress
+- **Error Analysis**: Specific error messages and troubleshooting hints
+- **Policy Retrieval**: Multiple fallback methods for different API configurations
+- **Real-time Feedback**: Live updates during scanning process
+
 ### 🎨 Rich Output Formatting
 - Color-coded risk assessment
 - Detailed vulnerability descriptions
@@ -94,8 +103,8 @@ Private API Gateways are designed to be accessible only from within specific VPC
 ### ⚡ Performance Optimized
 - Concurrent region scanning
 - Thread-safe operations
-- Efficient API calls
-- Graceful error handling
+- Efficient API calls with fallback methods
+- Graceful error handling and recovery
 
 ## 🚀 Installation
 
@@ -130,11 +139,11 @@ python api_gateway_scanner.py --help
 # Basic scan of all regions
 python api_gateway_scanner.py --region all
 
-# Scan specific region with verbose output
+# Scan with verbose output for debugging
 python api_gateway_scanner.py --region us-east-1 --verbose
 
-# Export results to JSON
-python api_gateway_scanner.py --region all --export json
+# Export results to JSON with verbose logging
+python api_gateway_scanner.py --region all --verbose --export json
 ```
 
 ## 📖 Usage
@@ -154,7 +163,7 @@ python api_gateway_scanner.py [OPTIONS]
 - `--profile`: AWS profile name
 - `--export`: Export format (json, csv)
 - `--output, -o`: Output filename
-- `--verbose, -v`: Enable verbose logging
+- `--verbose, -v`: Enable verbose logging and debugging
 
 ## 🔑 Authentication
 
@@ -191,6 +200,45 @@ python api_gateway_scanner.py --region all --profile sso-admin
 python api_gateway_scanner.py --region all
 ```
 
+## 🔍 Verbose Mode & Debugging
+
+The enhanced verbose mode provides detailed insights into the scanning process and helps troubleshoot issues:
+
+### Enable Verbose Mode
+```bash
+python api_gateway_scanner.py --region us-east-1 --verbose
+```
+
+### Verbose Output Example
+```
+INFO: Starting scan of region: us-east-1
+INFO: Connected to API Gateway service in us-east-1
+INFO: Found 3 REST APIs in us-east-1
+INFO: Analyzing API 1/3: my-private-api (abc123def456) - Types: ['PRIVATE']
+INFO: Policy analysis for abc123def456: CRITICAL - 2 issues found
+WARNING: Private API def456ghi789 (internal-api) has no resource policy
+ERROR: Failed to analyze private API ghi789jkl012: Parameter validation failed
+ERROR: This might be due to API Gateway version compatibility or insufficient permissions
+INFO: Direct policy retrieval failed for xyz789abc123, trying alternative method: An error occurred...
+INFO: Policy analysis for xyz789abc123: SECURE - 0 issues found
+```
+
+### Debug Information Includes:
+- **Connection Status**: Confirmation of AWS service connectivity
+- **API Discovery**: Number of APIs found in each region
+- **Policy Retrieval**: Multiple methods attempted for policy access
+- **Error Analysis**: Specific error types and suggested solutions
+- **Risk Assessment**: Real-time analysis results
+
+### Save Debug Output
+```bash
+# Save all output to file for analysis
+python api_gateway_scanner.py --region all --verbose 2>&1 | tee debug_output.log
+
+# Run with maximum verbosity
+python api_gateway_scanner.py --region all --verbose --export json --output detailed_scan.json
+```
+
 ## 📄 Output Formats
 
 ### Console Output
@@ -200,11 +248,13 @@ python api_gateway_scanner.py --region all
 ┡━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━┩
 │ us-east-1     │ abc123def456         │ private-api-prod          │ REST API      │ CRITICAL    │ Principal   │
 │               │                      │                           │               │             │ set to '*'  │
-│ us-west-2     │ ghi789jkl012         │ internal-api              │ REST API      │ SECURE      │ None        │
+│ us-west-2     │ ghi789jkl012         │ internal-api              │ REST API      │ NO_POLICY   │ No resource │
+│               │                      │                           │               │             │ policy      │
+│ eu-west-1     │ mno345pqr678         │ secure-api                │ REST API      │ SECURE      │ None        │
 └───────────────┴──────────────────────┴───────────────────────────┴───────────────┴─────────────┴─────────────┘
 
 Scan Summary:
-Total APIs found: 2
+Total APIs found: 3
 Critical issues: 1
 High risk issues: 0
 Medium risk issues: 0
@@ -225,6 +275,18 @@ Medium risk issues: 0
       "No conditions specified for permissive policy"
     ],
     "policy_document": "{\"Version\":\"2012-10-17\",...}"
+  },
+  {
+    "region": "us-west-2",
+    "api_id": "ghi789jkl012",
+    "api_name": "internal-api",
+    "api_type": "REST API",
+    "endpoint_types": ["PRIVATE"],
+    "status": "NO_POLICY",
+    "issues": [
+      "No resource policy found for private API - this may be a security risk"
+    ],
+    "policy_document": null
   }
 ]
 ```
@@ -258,42 +320,56 @@ Medium risk issues: 0
    - `"Action": "*"`
    - `"Action": "execute-api:*"`
 
+4. **Policy Retrieval Issues**
+   - Parameter validation failures
+   - Insufficient permissions
+   - API Gateway version compatibility
+
 ## 💡 Examples
 
-### Comprehensive Security Audit
+### Comprehensive Security Audit with Debugging
 ```bash
-# Scan all regions with full export
+# Scan all regions with full export and verbose logging
 python api_gateway_scanner.py \
   --region all \
+  --verbose \
   --export json \
-  --output security_audit_$(date +%Y%m%d).json \
-  --verbose
+  --output security_audit_$(date +%Y%m%d).json
 ```
 
-### Multi-Account Scanning
+### Troubleshooting Specific Region
 ```bash
-# Scan production account
-python api_gateway_scanner.py --region all --profile prod-account
-
-# Scan development account  
-python api_gateway_scanner.py --region all --profile dev-account
-
-# Scan staging account
-python api_gateway_scanner.py --region all --profile staging-account
+# Debug issues in a specific region
+python api_gateway_scanner.py \
+  --region us-east-1 \
+  --verbose \
+  --profile my-profile 2>&1 | tee troubleshoot.log
 ```
 
-### Continuous Integration
+### Multi-Account Scanning with Verbose Output
+```bash
+# Scan production account with detailed logging
+python api_gateway_scanner.py --region all --profile prod-account --verbose
+
+# Scan development account with export
+python api_gateway_scanner.py --region all --profile dev-account --verbose --export csv
+
+# Scan staging account with custom output
+python api_gateway_scanner.py --region all --profile staging-account --verbose --export json --output staging_scan.json
+```
+
+### Continuous Integration with Enhanced Logging
 ```bash
 #!/bin/bash
-# CI/CD pipeline integration
-python api_gateway_scanner.py --region all --export json --output scan_results.json
+# CI/CD pipeline integration with verbose output
+python api_gateway_scanner.py --region all --verbose --export json --output scan_results.json
 
-# Check exit code
+# Check exit code and provide detailed feedback
 if [ $? -eq 2 ]; then
-    echo "CRITICAL: Security issues found!"
+    echo "CRITICAL: Security issues found! Check scan_results.json for details"
     exit 1
 elif [ $? -eq 1 ]; then
-    echo "WARNING: High risk issues found!"
+    echo "WARNING: High risk issues found! Review scan_results.json"
     exit 1
 else
     echo "SUCCESS: No critical issues detected"
@@ -301,13 +377,15 @@ else
 fi
 ```
 
-### Automated Reporting
+### Automated Reporting with Debug Information
 ```bash
-# Generate daily security report
+# Generate daily security report with full debugging
 python api_gateway_scanner.py \
   --region all \
+  --verbose \
   --export csv \
-  --output "daily_scan_$(date +%Y%m%d_%H%M%S).csv"
+  --output "daily_scan_$(date +%Y%m%d_%H%M%S).csv" \
+  2>&1 | tee "daily_scan_debug_$(date +%Y%m%d_%H%M%S).log"
 ```
 
 ## 📋 Requirements
@@ -343,7 +421,7 @@ The scanner requires the following IAM permissions:
 
 ## 🔧 Troubleshooting
 
-### Common Issues
+### Common Issues and Solutions
 
 #### Authentication Errors
 ```
@@ -363,6 +441,17 @@ Error: User is not authorized to perform: apigateway:GET
 ```
 **Solution**: Add required IAM permissions to your user/role
 
+#### Parameter Validation Failed
+```
+Error checking policy: Parameter validation failed...
+```
+**Solution**: This is now handled automatically with fallback methods. Use `--verbose` to see detailed information:
+```bash
+python api_gateway_scanner.py --region us-east-1 --verbose
+```
+
+The scanner will attempt multiple methods to retrieve policies and provide detailed feedback about what's happening.
+
 #### Region Not Found
 ```
 Error: Invalid region specified
@@ -376,11 +465,36 @@ aws ec2 describe-regions --query 'Regions[].RegionName' --output text
 ```
 No API Gateways found.
 ```
-**Solution**: Verify you have API Gateways in the specified regions
+**Solution**: Verify you have API Gateways in the specified regions. Use `--verbose` to see detailed scan information.
 
-### Debug Mode
+#### Connection Timeouts
+```
+Error: Connection timeout
+```
+**Solution**: Check internet connectivity and AWS service status. The scanner includes retry logic for transient failures.
+
+### Enhanced Debugging
+
+#### Enable Maximum Verbosity
 ```bash
+# Get detailed information about every step
 python api_gateway_scanner.py --region us-east-1 --verbose
+
+# Save all debug output
+python api_gateway_scanner.py --region all --verbose 2>&1 | tee full_debug.log
+```
+
+#### Analyze Specific API Issues
+The verbose mode now provides specific information about:
+- Policy retrieval methods attempted
+- Specific error types and causes
+- Fallback mechanisms used
+- API Gateway version compatibility issues
+
+#### Debug Policy Retrieval
+```bash
+# Focus on a specific region with detailed policy analysis
+python api_gateway_scanner.py --region us-east-1 --verbose --export json --output debug_policies.json
 ```
 
 ### Getting Help
@@ -440,7 +554,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - 🐛 **Bug Reports**: [GitHub Issues](https://github.com/your-org/aws-api-gateway-scanner/issues)
 - 💡 **Feature Requests**: [GitHub Discussions](https://github.com/your-org/aws-api-gateway-scanner/discussions)
-- 📧 **Security Issues**: [Security Issues](https://github.com/your-org/aws-api-gateway-scanner/issues)
+- 📧 **Security Issues**: security@yourorg.com
 - 📖 **Documentation**: [Wiki](https://github.com/your-org/aws-api-gateway-scanner/wiki)
 
 ---
