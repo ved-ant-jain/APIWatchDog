@@ -1,60 +1,70 @@
-# AWS Private API Gateway Misconfiguration Scanner
+# APIWatchDog: AWS API Attack Surface Scanner
 
-[![Python Version](https://img.shields.io/badge/python-3.7%2B-blue.svg)](https://python.org)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Security](https://img.shields.io/badge/security-scanner-red.svg)](https://github.com/your-repo/api-gateway-scanner)
+> An "Inside-Out" AWS security scanner that analyzes your entire API Gateway environment (REST, HTTP, and WebSocket) to find deep, endpoint-level misconfigurations that traditional scanners miss.
 
-A comprehensive Python CLI tool designed to identify and assess security misconfigurations in AWS Private API Gateways that could allow unauthorized access from external AWS accounts.
+It moves beyond simple policy checks to map the true attack surface of your serverless applications, finding unauthenticated endpoints, integration vulnerabilities (like SSRF), and dozens of other high-risk settings.
 
 ## 🚨 Security Advisory
 
-**Private API Gateways are not inherently secure just because they're labeled "private."** Misconfigured resource policies can expose them to any AWS account worldwide, creating significant security vulnerabilities.
+> A single `authorizationType: NONE` on a forgotten test endpoint can lead to a full account compromise.
+
+Traditional "Outside-In" scanners (DAST) can't find your "shadow" APIs or understand the impact of a vulnerability.
+
+APIWatchDog scans from the "Inside-Out," starting with your AWS configuration to find 100% of your API assets and their specific weaknesses.
 
 ## 📋 Table of Contents
 
-- [Overview](#overview)
-- [The Vulnerability](#the-vulnerability)
-- [Features](#features)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Usage](#usage)
-- [Authentication](#authentication)
-- [Verbose Mode & Debugging](#verbose-mode--debugging)
-- [Output Formats](#output-formats)
-- [Risk Assessment](#risk-assessment)
-- [Examples](#examples)
-- [Requirements](#requirements)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
-- [Disclaimer](#disclaimer)
-- [License](#license)
+  * Overview
+  * The Vulnerability
+  * Features
+  * Installation
+  * Quick Start
+  * Usage
+  * Authentication
+  * Verbose Mode & Debugging
+  * Output Formats
+  * Risk Assessment
+  * Examples
+  * Requirements
+  * Troubleshooting
+  * Contributing
+  * Disclaimer
+  * License
 
 ## 🔍 Overview
 
-This tool addresses a critical but often overlooked AWS security vulnerability where Private API Gateways can be accessed from external AWS accounts due to misconfigured resource-based policies. The scanner helps security professionals, DevOps teams, and AWS administrators identify these misconfigurations across their AWS infrastructure.
+This tool addresses a critical but often overlooked AWS security vulnerability where Private API Gateways can be accessed from external AWS accounts due to misconfigured resource-based policies.
 
-### What it does:
-- ✅ Scans all AWS regions for API Gateway endpoints
-- ✅ Identifies Private API Gateways with overly permissive policies
-- ✅ Analyzes resource-based policies for security issues
-- ✅ Provides detailed verbose logging for troubleshooting
-- ✅ Handles multiple policy retrieval methods for compatibility
-- ✅ Provides risk assessment and remediation guidance
-- ✅ Exports findings in multiple formats (JSON, CSV)
-- ✅ Supports all AWS authentication methods
+More broadly, it scans for dozens of common misconfigurations across all API types.
+
+The scanner helps security professionals, DevOps teams, and AWS administrators identify these misconfigurations across their AWS infrastructure.
+
+**What it does:**
+
+  * ✅ **Discovers 100% of API Assets:** Scans all regions for REST, HTTP, and WebSocket APIs, including "shadow" and "zombie" APIs.
+  * ✅ **Finds Critical Auth Flaws:** Identifies unauthenticated endpoints (`authorizationType: NONE`), exposed `$default` routes, and weak API key usage.
+  * ✅ **Analyzes Private API Security:** Detects misconfigured Private API resource policies and insecure VPC Endpoint policies.
+  * ✅ **Scans Backend Integrations:** Finds potential SSRF, MOCK integrations, insecure VPC Links, and hardcoded IAM credentials.
+  * ✅ **Audits API Lifecycle:** Checks for unrotated API keys, disabled logging/tracing, weak TLS, and missing WAF/Shield protection.
+  * ✅ **Provides Detailed Reporting:** Exports all findings to JSON/CSV with clear risk levels.
 
 ## 🎯 The Vulnerability
 
-Private API Gateways are designed to be accessible only from within specific VPCs. However, when configured with overly permissive resource policies, they become accessible from any AWS account that can create a VPC endpoint in the same region.
+Private API Gateways are designed to be accessible only from within specific VPCs.
 
-### Common Misconfigurations:
+However, when configured with overly permissive resource policies, they become accessible from any AWS account that can create a VPC endpoint in the same region.
+
+This is just one of many vulnerabilities APIWatchDog finds.
+
+**Common Misconfigurations:**
+
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
     {
       "Effect": "Allow",
-      "Principal": "*",                    // ❌ CRITICAL: Allows ANY AWS account
+      "Principal": "*", // ❌ CRITICAL: Allows ANY AWS account
       "Action": "execute-api:Invoke",
       "Resource": "*"
     }
@@ -62,62 +72,63 @@ Private API Gateways are designed to be accessible only from within specific VPC
 }
 ```
 
-### Attack Vector:
-1. Attacker discovers a misconfigured Private API Gateway
-2. Creates a VPC endpoint in the same AWS region
-3. Launches an EC2 instance in their VPC
-4. Successfully invokes the "private" API from their AWS account
+**Attack Vector:**
+
+1.  Attacker discovers a misconfigured Private API Gateway
+2.  Creates a VPC endpoint in the same AWS region
+3.  Launches an EC2 instance in their VPC
+4.  Successfully invokes the "private" API from their AWS account
 
 ## ✨ Features
 
-### 🌍 Multi-Region Support
-- **All Regions**: `--region all`
-- **Single Region**: `--region us-east-1`
-- **Multiple Regions**: `--region us-east-1,eu-west-1,ap-southeast-1`
+APIWatchDog is a comprehensive scanner that checks for a wide range of vulnerabilities:
 
-### 🔐 Comprehensive Authentication
-- AWS Access Keys and Secret Keys
-- Temporary credentials with session tokens
-- AWS SSO and named profiles
-- IAM roles and cross-account access
-- Environment variables and credential files
-
-### 🔍 Enhanced Debugging & Verbose Mode
-- **Detailed Logging**: Step-by-step scan progress
-- **Error Analysis**: Specific error messages and troubleshooting hints
-- **Policy Retrieval**: Multiple fallback methods for different API configurations
-- **Real-time Feedback**: Live updates during scanning process
-
-### 🎨 Rich Output Formatting
-- Color-coded risk assessment
-- Detailed vulnerability descriptions
-- Summary statistics and metrics
-- Progress indicators for long scans
-
-### 📊 Export Capabilities
-- JSON format for programmatic processing
-- CSV format for spreadsheet analysis
-- Timestamped output files
-- Custom filename support
-
-### ⚡ Performance Optimized
-- Concurrent region scanning
-- Thread-safe operations
-- Efficient API calls with fallback methods
-- Graceful error handling and recovery
+1.  **API Endpoint Security (CRITICAL)**
+      * **Unauthenticated Endpoints:** Finds all REST and HTTP endpoints with `authorizationType: NONE`.
+      * \*\*Unauthenticated $default Route:** Finds v2 HTTP APIs with a catch-all `$default\` route that has no authentication.
+      * **Weak API Key Auth:** Flags endpoints that use an API Key *instead of* (not in addition to) real authentication.
+      * **Insecure CORS:** Detects overly permissive `Access-Control-Allow-Origin: *` policies on `OPTIONS` methods.
+2.  **Private API & VPC Security**
+      * **Misconfigured Private API Policies (CRITICAL):** Detects private APIs with resource policies allowing `Principal: *` without a VPC condition, making them accessible from *any* AWS account.
+      * **Insecure VPC Endpoints:** Scans `execute-api` VPC Endpoints for permissive resource policies (`Principal: *`) that could expose internal APIs.
+3.  **Integration & Backend Risk (HIGH)**
+      * **SSRF Vulnerabilities:** Detects `HTTP_PROXY` integrations that point to internal/private IP addresses (both IPv4 and IPv6).
+      * **MOCK Integrations:** Finds `MOCK` integrations, which should not exist in production environments.
+      * **VPC Link Integrations:** Flags `VPC_LINK` integrations for manual review to ensure backend services have proper authentication.
+      * **Hardcoded Credentials:** Finds integrations that use a hardcoded IAM role credential instead of resource-based policies.
+      * **VTL Mapping:** Flags endpoints that use VTL mapping templates, which require manual review for injection or data leak risks.
+4.  **API Lifecycle & Configuration**
+      * **Unrotated API Keys:** Scans for API Keys that have not been rotated in over 90 days.
+      * **Default Endpoint Enabled:** Flags APIs that allow invocation via the default `execute-api` endpoint, which can bypass WAFs.
+      * **"Zombie" API Detection:** Identifies APIs with no resources or no deployments.
+5.  **Stage-Level Security**
+      * **WAF Integration:** Checks if API stages are protected by a WAFv2 WebACL.
+      * **Access Logging:** Checks that Access Logging is enabled.
+      * **X-Ray Tracing:** Checks that X-Ray Tracing is enabled for observability.
+      * **Cache Encryption:** Checks that cache data encryption is enabled (if caching is used).
+6.  **Authorizer & Domain Security**
+      * **Weak Authorizer Validation:** Finds `TOKEN` authorizers with no `identityValidationExpression` (regex).
+      * **Insecure Lambda Authorizers:**
+          * Checks for permissive Lambda resource policies.
+          * Flags authorizers with dangerously short timeouts (\< 3s).
+      * **Weak TLS Policies:** Scans custom domains and flags those using outdated `TLS_1_0` policies.
+      * **Missing mTLS:** Flags regional custom domains that do not enforce mutual TLS.
+      * **Shield Advanced:** Checks if AWS Shield Advanced is active on the account.
 
 ## 🚀 Installation
 
 ### Prerequisites
-- Python 3.7 or higher
-- Valid AWS credentials
-- Internet connectivity
+
+  * Python 3.7 or higher
+  * Valid AWS credentials
+  * Internet connectivity
 
 ### Install Dependencies
-```bash
+
+```sh
 # Clone the repository
-git clone https://github.com/your-org/aws-api-gateway-scanner.git
-cd aws-api-gateway-scanner
+git clone https://github.com/ved-ant-jain/APIWatchDog.git
+cd APIWatchDog
 
 # Install required packages
 pip install -r requirements.txt
@@ -129,13 +140,14 @@ pip install -r requirements.txt
 ```
 
 ### Verify Installation
-```bash
+
+```sh
 python api_gateway_scanner.py --help
 ```
 
 ## 🏃 Quick Start
 
-```bash
+```sh
 # Basic scan of all regions
 python api_gateway_scanner.py --region all
 
@@ -149,89 +161,95 @@ python api_gateway_scanner.py --region all --verbose --export json
 ## 📖 Usage
 
 ### Basic Syntax
-```bash
+
+```sh
 python api_gateway_scanner.py [OPTIONS]
 ```
 
 ### Required Arguments
-- `--region, -r`: AWS region(s) to scan
+
+  * `--region, -r`: AWS region(s) to scan
 
 ### Optional Arguments
-- `--access-key`: AWS Access Key ID
-- `--secret-key`: AWS Secret Access Key  
-- `--session-token`: AWS Session Token (for temporary credentials)
-- `--profile`: AWS profile name
-- `--export`: Export format (json, csv)
-- `--output, -o`: Output filename
-- `--verbose, -v`: Enable verbose logging and debugging
+
+  * `--access-key`: AWS Access Key ID
+  * `--secret-key`: AWS Secret Access Key
+  * `--session-token`: AWS Session Token (for temporary credentials)
+  * `--profile`: AWS profile name
+  * `--export`: Export format (json, csv)
+  * `--output, -o`: Output filename
+  * `--verbose, -v`: Enable verbose logging and debugging
 
 ## 🔑 Authentication
 
 The scanner supports all standard AWS authentication methods:
 
-### 1. Environment Variables
-```bash
-export AWS_ACCESS_KEY_ID="your-access-key"
-export AWS_SECRET_ACCESS_KEY="your-secret-key"
-export AWS_SESSION_TOKEN="your-session-token"  # Optional
-python api_gateway_scanner.py --region all
-```
+1.  **Environment Variables**
+    ```sh
+    export AWS_ACCESS_KEY_ID="your-access-key"
+    export AWS_SECRET_ACCESS_KEY="your-secret-key"
+    export AWS_SESSION_TOKEN="your-session-token"  # Optional
+    python api_gateway_scanner.py --region all
+    ```
+2.  **Command Line Arguments**
+    ```sh
+    python api_gateway_scanner.py --region all \
+      --access-key AKIA... \
+      --secret-key wJalrXUt... \
+      --session-token IQoJb3Jp...
+    ```
+3.  **AWS Profiles**
+    ```sh
+    # Use named profile
+    python api_gateway_scanner.py --region all --profile production
 
-### 2. Command Line Arguments
-```bash
-python api_gateway_scanner.py --region all \
-  --access-key AKIA... \
-  --secret-key wJalrXUt... \
-  --session-token IQoJb3Jp...
-```
-
-### 3. AWS Profiles
-```bash
-# Use named profile
-python api_gateway_scanner.py --region all --profile production
-
-# Use SSO profile
-python api_gateway_scanner.py --region all --profile sso-admin
-```
-
-### 4. Default Credentials
-```bash
-# Uses ~/.aws/credentials or IAM role
-python api_gateway_scanner.py --region all
-```
+    # Use SSO profile
+    python api_gateway_scanner.py --region all --profile sso-admin
+    ```
+4.  **Default Credentials**
+    ```sh
+    # Uses ~/.aws/credentials or IAM role
+    python api_gateway_scanner.py --region all
+    ```
 
 ## 🔍 Verbose Mode & Debugging
 
 The enhanced verbose mode provides detailed insights into the scanning process and helps troubleshoot issues:
 
 ### Enable Verbose Mode
-```bash
+
+```sh
 python api_gateway_scanner.py --region us-east-1 --verbose
 ```
 
 ### Verbose Output Example
-```
-INFO: Starting scan of region: us-east-1
-INFO: Connected to API Gateway service in us-east-1
-INFO: Found 3 REST APIs in us-east-1
-INFO: Analyzing API 1/3: my-private-api (abc123def456) - Types: ['PRIVATE']
-INFO: Policy analysis for abc123def456: CRITICAL - 2 issues found
-WARNING: Private API def456ghi789 (internal-api) has no resource policy
-ERROR: Failed to analyze private API ghi789jkl012: Parameter validation failed
-ERROR: This might be due to API Gateway version compatibility or insufficient permissions
-INFO: Direct policy retrieval failed for xyz789abc123, trying alternative method: An error occurred...
-INFO: Policy analysis for xyz789abc123: SECURE - 0 issues found
+
+```text
+INFO:APIWatchDog:Verifying necessary IAM permissions...
+INFO:APIWatchDog:IAM permission check passed.
+INFO:APIWatchDog:Starting scan of region: us-east-1
+INFO:APIWatchDog:[us-east-1] Scanning REST (v1) APIs...
+INFO:APIWatchDog:Found WAF acl-name associated with arn:aws:apigateway:us-east-1::/restapis/ab12cdef34/stages/prod
+INFO:APIWatchDog:[us-east-1] Could not get authorizers for ab12cdef34: An error occurred (AccessDeniedException)...
+INFO:APIWatchDog:[us-east-1] Scanning HTTP/WebSocket (v2) APIs...
+INFO:APIWatchDog:[us-east-1] Scanning Custom Domains (v1)...
+INFO:APIWatchDog:[us-east-1] Scanning API Keys...
+INFO:APIWatchDog:[us-east-1] Scanning VPC Endpoints...
+INFO:APIWatchDog:Finished scan of region: us-east-1.
+Found 3 potential findings.
 ```
 
 ### Debug Information Includes:
-- **Connection Status**: Confirmation of AWS service connectivity
-- **API Discovery**: Number of APIs found in each region
-- **Policy Retrieval**: Multiple methods attempted for policy access
-- **Error Analysis**: Specific error types and suggested solutions
-- **Risk Assessment**: Real-time analysis results
+
+  * **Connection Status**: Confirmation of AWS service connectivity
+  * **API Discovery**: Number of APIs found in each region
+  * **Policy Retrieval**: Multiple methods attempted for policy access
+  * **Error Analysis**: Specific error types and suggested solutions
+  * **Risk Assessment**: Real-time analysis results
 
 ### Save Debug Output
-```bash
+
+```sh
 # Save all output to file for analysis
 python api_gateway_scanner.py --region all --verbose 2>&1 | tee debug_output.log
 
@@ -241,94 +259,69 @@ python api_gateway_scanner.py --region all --verbose --export json --output deta
 
 ## 📄 Output Formats
 
-### Console Output
-```
-┏━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┓
-┃ Region        ┃ API ID               ┃ Name                      ┃ Type          ┃ Status      ┃ Issues      ┃
-┡━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━┩
-│ us-east-1     │ abc123def456         │ private-api-prod          │ REST API      │ CRITICAL    │ Principal   │
-│               │                      │                           │               │             │ set to '*'  │
-│ us-west-2     │ ghi789jkl012         │ internal-api              │ REST API      │ NO_POLICY   │ No resource │
-│               │                      │                           │               │             │ policy      │
-│ eu-west-1     │ mno345pqr678         │ secure-api                │ REST API      │ SECURE      │ None        │
-└───────────────┴──────────────────────┴───────────────────────────┴───────────────┴─────────────┴─────────────┘
+### Console Output (Rich)
 
-Scan Summary:
-Total APIs found: 3
-Critical issues: 1
-High risk issues: 0
-Medium risk issues: 0
-```
+A color-coded, human-readable table printed directly to your console.
 
 ### JSON Export
+
+`--export json`
+
 ```json
 [
   {
     "region": "us-east-1",
-    "api_id": "abc123def456",
-    "api_name": "private-api-prod",
-    "api_type": "REST API",
-    "endpoint_types": ["PRIVATE"],
-    "status": "CRITICAL",
-    "issues": [
-      "Principal set to '*' (allows any AWS account)",
-      "No conditions specified for permissive policy"
-    ],
-    "policy_document": "{\"Version\":\"2012-10-17\",...}"
+    "api_id": "ab12cdef34",
+    "api_name": "public-user-api",
+    "api_type": "REST (REGIONAL)",
+    "endpoint": "POST /admin/create",
+    "risk": "CRITICAL",
+    "finding_details": "Endpoint has NO authentication (authorizationType: NONE)."
+  },
+  {
+    "region": "us-east-1",
+    "api_id": "pv12cdef35",
+    "api_name": "internal-db-api",
+    "api_type": "REST (PRIVATE)",
+    "endpoint": "N/A (Policy)",
+    "risk": "CRITICAL",
+    "finding_details": "Private API has a resource policy allowing 'Principal: *' with no VPC/VPCE condition, making it accessible from any AWS account."
   },
   {
     "region": "us-west-2",
-    "api_id": "ghi789jkl012",
-    "api_name": "internal-api",
-    "api_type": "REST API",
-    "endpoint_types": ["PRIVATE"],
-    "status": "NO_POLICY",
-    "issues": [
-      "No resource policy found for private API - this may be a security risk"
-    ],
-    "policy_document": null
+    "api_id": "d12cdef36",
+    "api_name": "proxy-api",
+    "api_type": "REST (REGIONAL)",
+    "endpoint": "ANY /proxy",
+    "risk": "HIGH",
+    "finding_details": "Integration URI points to a private IP (10.0.1.50). This is a potential SSRF risk."
   }
 ]
 ```
 
+### CSV Export
+
+`--export csv`
+
+A standard CSV file with one row per finding.
+
 ## 🎯 Risk Assessment
 
-### Risk Levels
+Findings are categorized by risk level to help you prioritize remediation.
 
-| Level | Color | Description | Action Required |
-|-------|-------|-------------|-----------------|
-| 🔴 **CRITICAL** | Red | API accessible from any AWS account | **Immediate action required** |
-| 🟠 **HIGH** | Orange | Broad access with insufficient conditions | **Review and restrict access** |
-| 🟡 **MEDIUM** | Yellow | Minor policy issues or warnings | **Consider improvements** |
-| 🟢 **SECURE** | Green | Properly configured | **No action needed** |
-| ⚪ **NO_POLICY** | White | Private API without resource policy | **Add resource policy** |
-| ❌ **ERROR** | Red | Unable to analyze | **Check permissions** |
-
-### Common Issues Detected
-
-1. **Principal Wildcards**
-   - `"Principal": "*"`
-   - `"Principal": {"AWS": "*"}`
-   - `"Principal": {"AWS": "arn:aws:iam::*:root"}`
-
-2. **Missing Conditions**
-   - No `aws:SourceVpc` condition
-   - No `aws:SourceVpce` condition
-   - No IP address restrictions
-
-3. **Overly Broad Actions**
-   - `"Action": "*"`
-   - `"Action": "execute-api:*"`
-
-4. **Policy Retrieval Issues**
-   - Parameter validation failures
-   - Insufficient permissions
-   - API Gateway version compatibility
+| Risk Level | Color | Description |
+| :--- | :--- | :--- |
+| **CRITICAL** | Red | Immediate Exploit - An unauthenticated public endpoint, an exposed `$default` route, or a fully exposed private API. |
+| **HIGH** | Orange | Significant Risk - A potential SSRF, a MOCK integration in prod, or a very weak authorizer. |
+| **MEDIUM** | Yellow | Security Hygiene - Missing WAF, disabled logging, unrotated keys, or permissive CORS/VPC Endpoint policies. |
+| **LOW** | Dim | Informational - Missing tracing, short Lambda timeouts, or use of VTL mapping (requires review). |
+| **INFO** | Blue | Context - AWS Shield Advanced is enabled. |
 
 ## 💡 Examples
 
 ### Comprehensive Security Audit with Debugging
-```bash
+
+```sh
 # Scan all regions with full export and verbose logging
 python api_gateway_scanner.py \
   --region all \
@@ -338,7 +331,8 @@ python api_gateway_scanner.py \
 ```
 
 ### Troubleshooting Specific Region
-```bash
+
+```sh
 # Debug issues in a specific region
 python api_gateway_scanner.py \
   --region us-east-1 \
@@ -347,7 +341,8 @@ python api_gateway_scanner.py \
 ```
 
 ### Multi-Account Scanning with Verbose Output
-```bash
+
+```sh
 # Scan production account with detailed logging
 python api_gateway_scanner.py --region all --profile prod-account --verbose
 
@@ -359,7 +354,8 @@ python api_gateway_scanner.py --region all --profile staging-account --verbose -
 ```
 
 ### Continuous Integration with Enhanced Logging
-```bash
+
+```sh
 #!/bin/bash
 # CI/CD pipeline integration with verbose output
 python api_gateway_scanner.py --region all --verbose --export json --output scan_results.json
@@ -378,35 +374,46 @@ fi
 ```
 
 ### Automated Reporting with Debug Information
-```bash
+
+```sh
 # Generate daily security report with full debugging
 python api_gateway_scanner.py \
   --region all \
   --verbose \
   --export csv \
   --output "daily_scan_$(date +%Y%m%d_%H%M%S).csv" \
-  2>&1 | tee "daily_scan_debug_$(date +%Y%m%d_%H%M%S).log"
+  2>&1 | tee "daily_scan_debug_$(date +G%Y%m%d_%H%M%S).log"
 ```
 
 ## 📋 Requirements
 
 ### System Requirements
-- **Python**: 3.7 or higher
-- **Memory**: 256MB minimum
-- **Network**: Internet access to AWS APIs
-- **Disk**: 50MB for dependencies
+
+  * **Python**: 3.7 or higher
+  * `pip install -r requirements.txt`
 
 ### AWS Permissions
-The scanner requires the following IAM permissions:
+
+The tool needs a read-only IAM policy. This policy provides the *minimum* permissions required for all checks.
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "APIWatchDogReadOnly",
       "Effect": "Allow",
       "Action": [
         "apigateway:GET",
+        "apigatewayv2:GET",
+        "lambda:GetFunctionConfiguration",
+        "lambda:GetPolicy",
+        "lambda:ListFunctions",
+        "ec2:DescribeVpcEndpoints",
+        "wafv2:ListWebACLs",
+        "wafv2:ListResourcesForWebACL",
+        "shield:DescribeSubscription",
+        "sts:GetCallerIdentity",
         "ec2:DescribeRegions"
       ],
       "Resource": "*"
@@ -416,147 +423,57 @@ The scanner requires the following IAM permissions:
 ```
 
 ### Python Dependencies
-- `boto3 >= 1.26.0` - AWS SDK for Python
-- `rich >= 12.0.0` - Rich text formatting (optional but recommended)
+
+  * `boto3 >= 1.26.0` - AWS SDK for Python
+  * `rich >= 12.0.0` - Rich text formatting (optional but recommended)
 
 ## 🔧 Troubleshooting
 
 ### Common Issues and Solutions
 
-#### Authentication Errors
-```
-Error: Unable to locate credentials
-```
-**Solution**: Ensure AWS credentials are properly configured
-```bash
-aws configure list
-# or
-export AWS_ACCESS_KEY_ID="your-key"
-export AWS_SECRET_ACCESS_KEY="your-secret"
-```
+**Authentication Errors**
 
-#### Permission Denied
-```
-Error: User is not authorized to perform: apigateway:GET
-```
-**Solution**: Add required IAM permissions to your user/role
+  * **Error:** `Unable to locate credentials`
+  * **Solution**: Ensure AWS credentials are properly configured
+    ```sh
+    aws configure list
+    # or
+    export AWS_ACCESS_KEY_ID="your-key"
+    export AWS_SECRET_ACCESS_KEY="your-secret"
+    ```
 
-#### Parameter Validation Failed
-```
-Error checking policy: Parameter validation failed...
-```
-**Solution**: This is now handled automatically with fallback methods. Use `--verbose` to see detailed information:
-```bash
-python api_gateway_scanner.py --region us-east-1 --verbose
-```
+**Permission Denied**
 
-The scanner will attempt multiple methods to retrieve policies and provide detailed feedback about what's happening.
+  * **Error:** `User is not authorized to perform: apigateway:GET`
+  * **Solution**: Add required IAM permissions to your user/role (see Requirements).
 
-#### Region Not Found
-```
-Error: Invalid region specified
-```
-**Solution**: Use valid AWS region names
-```bash
-aws ec2 describe-regions --query 'Regions[].RegionName' --output text
-```
+**Connection Timeouts**
 
-#### No APIs Found
-```
-No API Gateways found.
-```
-**Solution**: Verify you have API Gateways in the specified regions. Use `--verbose` to see detailed scan information.
-
-#### Connection Timeouts
-```
-Error: Connection timeout
-```
-**Solution**: Check internet connectivity and AWS service status. The scanner includes retry logic for transient failures.
-
-### Enhanced Debugging
-
-#### Enable Maximum Verbosity
-```bash
-# Get detailed information about every step
-python api_gateway_scanner.py --region us-east-1 --verbose
-
-# Save all debug output
-python api_gateway_scanner.py --region all --verbose 2>&1 | tee full_debug.log
-```
-
-#### Analyze Specific API Issues
-The verbose mode now provides specific information about:
-- Policy retrieval methods attempted
-- Specific error types and causes
-- Fallback mechanisms used
-- API Gateway version compatibility issues
-
-#### Debug Policy Retrieval
-```bash
-# Focus on a specific region with detailed policy analysis
-python api_gateway_scanner.py --region us-east-1 --verbose --export json --output debug_policies.json
-```
+  * **Error:** `Connection timeout`
+  * Two. **Solution**: Check internet connectivity and AWS service status. The scanner includes retry logic for transient failures.
 
 ### Getting Help
-```bash
+
+```sh
 python api_gateway_scanner.py --help
 ```
 
 ## 🤝 Contributing
 
-We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
-
-### Development Setup
-```bash
-git clone https://github.com/your-org/aws-api-gateway-scanner.git
-cd aws-api-gateway-scanner
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-pip install -r requirements-dev.txt
-```
-
-### Running Tests
-```bash
-python -m pytest tests/
-python scripts/test_scanner.py
-```
-
-### Code Style
-```bash
-black api_gateway_scanner.py
-flake8 api_gateway_scanner.py
-```
+Contributions are welcome\! Please feel free to open a GitHub Issue for bugs or a Pull Request for new features.
 
 ## ⚖️ Disclaimer
 
 This tool is designed for legitimate security assessment purposes only. Users are responsible for:
 
-- ✅ Obtaining proper authorization before scanning AWS environments
-- ✅ Complying with their organization's security policies
-- ✅ Following AWS Acceptable Use Policy
-- ✅ Respecting rate limits and API quotas
-- ✅ Protecting sensitive information discovered during scans
+  * ✅ Obtaining proper authorization before scanning AWS environments
+  * ✅ Complying with their organization's security policies
+  * ✅ Following AWS Acceptable Use Policy
+  * ✅ Respecting rate limits and API quotas
+  * ✅ Protecting sensitive information discovered during scans
 
-**The authors are not responsible for any misuse of this tool or any damages resulting from its use.**
+The authors are not responsible for any misuse of this tool or any damages resulting from its use.
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-- AWS Security Team for their documentation on API Gateway security
-- The open-source community for their contributions and feedback
-- Security researchers who identified and disclosed this vulnerability class
-
-## 📞 Support
-
-- 🐛 **Bug Reports**: [GitHub Issues](https://github.com/ved-ant-jain/aws-api-gateway-scanner/issues)
-- 💡 **Feature Requests**: [GitHub Discussions](https://github.com/ved-ant-jain/aws-api-gateway-scanner/discussions)
-- 📧 **Security Issues**: [Security Issues](https://github.com/ved-ant-jain/aws-api-gateway-scanner/issues)
-- 📖 **Documentation**: [Wiki](https://github.com/ved-ant-jain/aws-api-gateway-scanner/wiki)
-
----
-
-**⭐ If this tool helped secure your AWS environment, please consider giving it a star!**
+This project is licensed under the MIT License - see the `LICENSE` file for details.
