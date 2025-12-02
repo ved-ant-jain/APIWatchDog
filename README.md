@@ -6,9 +6,7 @@ It moves beyond simple policy checks to map the true attack surface of your serv
 
 ## 🚨 Security Advisory
 
-> A single `authorizationType: NONE` on a forgotten test endpoint can lead to a full account compromise.
-
-Traditional "Outside-In" scanners (DAST) can't find your "shadow" APIs or understand the impact of a vulnerability.
+A single `authorizationType: NONE` on a forgotten test endpoint can lead to a full account compromise. Traditional "Outside-In" scanners (DAST) can't find your "shadow" APIs or understand the impact of a vulnerability.
 
 APIWatchDog scans from the "Inside-Out," starting with your AWS configuration to find 100% of your API assets and their specific weaknesses.
 
@@ -33,9 +31,7 @@ APIWatchDog scans from the "Inside-Out," starting with your AWS configuration to
 
 ## 🔍 Overview
 
-This tool addresses a critical but often overlooked AWS security vulnerability where Private API Gateways can be accessed from external AWS accounts due to misconfigured resource-based policies.
-
-More broadly, it scans for dozens of common misconfigurations across all API types.
+This tool addresses a critical but often overlooked AWS security vulnerability where Private API Gateways can be accessed from external AWS accounts due to misconfigured resource-based policies. More broadly, it scans for dozens of common misconfigurations across all API types.
 
 The scanner helps security professionals, DevOps teams, and AWS administrators identify these misconfigurations across their AWS infrastructure.
 
@@ -50,11 +46,7 @@ The scanner helps security professionals, DevOps teams, and AWS administrators i
 
 ## 🎯 The Vulnerability
 
-Private API Gateways are designed to be accessible only from within specific VPCs.
-
-However, when configured with overly permissive resource policies, they become accessible from any AWS account that can create a VPC endpoint in the same region.
-
-This is just one of many vulnerabilities APIWatchDog finds.
+Private API Gateways are designed to be accessible only from within specific VPCs. However, when configured with overly permissive resource policies, they become accessible from any AWS account that can create a VPC endpoint in the same region. This is just one of many vulnerabilities APIWatchDog finds.
 
 **Common Misconfigurations:**
 
@@ -64,7 +56,7 @@ This is just one of many vulnerabilities APIWatchDog finds.
   "Statement": [
     {
       "Effect": "Allow",
-      "Principal": "*", // ❌ CRITICAL: Allows ANY AWS account
+      "Principal": "*",                    // ❌ CRITICAL: Allows ANY AWS account
       "Action": "execute-api:Invoke",
       "Resource": "*"
     }
@@ -74,46 +66,57 @@ This is just one of many vulnerabilities APIWatchDog finds.
 
 **Attack Vector:**
 
-1.  Attacker discovers a misconfigured Private API Gateway
-2.  Creates a VPC endpoint in the same AWS region
-3.  Launches an EC2 instance in their VPC
-4.  Successfully invokes the "private" API from their AWS account
+1.  Attacker discovers a misconfigured Private API Gateway.
+2.  Creates a VPC endpoint in the same AWS region.
+3.  Launches an EC2 instance in their VPC.
+4.  Successfully invokes the "private" API from their AWS account.
 
 ## ✨ Features
 
 APIWatchDog is a comprehensive scanner that checks for a wide range of vulnerabilities:
 
-1.  **API Endpoint Security (CRITICAL)**
-      * **Unauthenticated Endpoints:** Finds all REST and HTTP endpoints with `authorizationType: NONE`.
-      * \*\*Unauthenticated $default Route:** Finds v2 HTTP APIs with a catch-all `$default\` route that has no authentication.
-      * **Weak API Key Auth:** Flags endpoints that use an API Key *instead of* (not in addition to) real authentication.
-      * **Insecure CORS:** Detects overly permissive `Access-Control-Allow-Origin: *` policies on `OPTIONS` methods.
-2.  **Private API & VPC Security**
-      * **Misconfigured Private API Policies (CRITICAL):** Detects private APIs with resource policies allowing `Principal: *` without a VPC condition, making them accessible from *any* AWS account.
-      * **Insecure VPC Endpoints:** Scans `execute-api` VPC Endpoints for permissive resource policies (`Principal: *`) that could expose internal APIs.
-3.  **Integration & Backend Risk (HIGH)**
-      * **SSRF Vulnerabilities:** Detects `HTTP_PROXY` integrations that point to internal/private IP addresses (both IPv4 and IPv6).
-      * **MOCK Integrations:** Finds `MOCK` integrations, which should not exist in production environments.
-      * **VPC Link Integrations:** Flags `VPC_LINK` integrations for manual review to ensure backend services have proper authentication.
-      * **Hardcoded Credentials:** Finds integrations that use a hardcoded IAM role credential instead of resource-based policies.
-      * **VTL Mapping:** Flags endpoints that use VTL mapping templates, which require manual review for injection or data leak risks.
-4.  **API Lifecycle & Configuration**
-      * **Unrotated API Keys:** Scans for API Keys that have not been rotated in over 90 days.
-      * **Default Endpoint Enabled:** Flags APIs that allow invocation via the default `execute-api` endpoint, which can bypass WAFs.
-      * **"Zombie" API Detection:** Identifies APIs with no resources or no deployments.
-5.  **Stage-Level Security**
-      * **WAF Integration:** Checks if API stages are protected by a WAFv2 WebACL.
-      * **Access Logging:** Checks that Access Logging is enabled.
-      * **X-Ray Tracing:** Checks that X-Ray Tracing is enabled for observability.
-      * **Cache Encryption:** Checks that cache data encryption is enabled (if caching is used).
-6.  **Authorizer & Domain Security**
-      * **Weak Authorizer Validation:** Finds `TOKEN` authorizers with no `identityValidationExpression` (regex).
-      * **Insecure Lambda Authorizers:**
-          * Checks for permissive Lambda resource policies.
-          * Flags authorizers with dangerously short timeouts (\< 3s).
-      * **Weak TLS Policies:** Scans custom domains and flags those using outdated `TLS_1_0` policies.
-      * **Missing mTLS:** Flags regional custom domains that do not enforce mutual TLS.
-      * **Shield Advanced:** Checks if AWS Shield Advanced is active on the account.
+### 1\. API Endpoint Security (CRITICAL)
+
+  * **Unauthenticated Endpoints:** Finds all REST and HTTP endpoints with `authorizationType: NONE`.
+  * \*\*Unauthenticated $default Route:** Finds v2 HTTP APIs with a catch-all `$default\` route that has no authentication.
+  * **Weak API Key Auth:** Flags endpoints that use an API Key instead of (not in addition to) real authentication.
+  * **Insecure CORS:** Detects overly permissive `Access-Control-Allow-Origin: *` policies on `OPTIONS` methods.
+
+### 2\. Private API & VPC Security
+
+  * **Misconfigured Private API Policies (CRITICAL):** Detects private APIs with resource policies allowing `Principal: *` without a VPC condition, making them accessible from any AWS account.
+  * **Insecure VPC Endpoints:** Scans `execute-api` VPC Endpoints for permissive resource policies (`Principal: *`) that could expose internal APIs.
+
+### 3\. Integration & Backend Risk (HIGH)
+
+  * **SSRF Vulnerabilities:** Detects `HTTP_PROXY` integrations that point to internal/private IP addresses (both IPv4 and IPv6).
+  * **MOCK Integrations:** Finds `MOCK` integrations, which should not exist in production environments.
+  * **VPC Link Integrations:** Flags `VPC_LINK` integrations for manual review to ensure backend services have proper authentication.
+  * **Hardcoded Credentials:** Finds integrations that use a hardcoded IAM role credential instead of resource-based policies.
+  * **VTL Mapping:** Flags endpoints that use VTL mapping templates, which require manual review for injection or data leak risks.
+
+### 4\. API Lifecycle & Configuration
+
+  * **Unrotated API Keys:** Scans for API Keys that have not been rotated in over 90 days.
+  * **Default Endpoint Enabled:** Flags APIs that allow invocation via the default `execute-api` endpoint, which can bypass WAFs.
+  * **"Zombie" API Detection:** Identifies APIs with no resources or no deployments.
+
+### 5\. Stage-Level Security
+
+  * **WAF Integration:** Checks if API stages are protected by a WAFv2 WebACL.
+  * **Access Logging:** Checks that Access Logging is enabled.
+  * **X-Ray Tracing:** Checks that X-Ray Tracing is enabled for observability.
+  * **Cache Encryption:** Checks that cache data encryption is enabled (if caching is used).
+
+### 6\. Authorizer & Domain Security
+
+  * **Weak Authorizer Validation:** Finds `TOKEN` authorizers with no `identityValidationExpression` (regex).
+  * **Insecure Lambda Authorizers:**
+      * Checks for permissive Lambda resource policies.
+      * Flags authorizers with dangerously short timeouts (\< 3s).
+  * **Weak TLS Policies:** Scans custom domains and flags those using outdated `TLS_1_0` policies.
+  * **Missing mTLS:** Flags regional custom domains that do not enforce mutual TLS.
+  * **Shield Advanced:** Checks if AWS Shield Advanced is active on the account.
 
 ## 🚀 Installation
 
@@ -125,7 +128,7 @@ APIWatchDog is a comprehensive scanner that checks for a wide range of vulnerabi
 
 ### Install Dependencies
 
-```sh
+```bash
 # Clone the repository
 git clone https://github.com/ved-ant-jain/APIWatchDog.git
 cd APIWatchDog
@@ -141,13 +144,13 @@ pip install -r requirements.txt
 
 ### Verify Installation
 
-```sh
+```bash
 python api_gateway_scanner.py --help
 ```
 
 ## 🏃 Quick Start
 
-```sh
+```bash
 # Basic scan of all regions
 python api_gateway_scanner.py --region all
 
@@ -162,7 +165,7 @@ python api_gateway_scanner.py --region all --verbose --export json
 
 ### Basic Syntax
 
-```sh
+```bash
 python api_gateway_scanner.py [OPTIONS]
 ```
 
@@ -185,29 +188,36 @@ python api_gateway_scanner.py [OPTIONS]
 The scanner supports all standard AWS authentication methods:
 
 1.  **Environment Variables**
-    ```sh
+
+    ```bash
     export AWS_ACCESS_KEY_ID="your-access-key"
     export AWS_SECRET_ACCESS_KEY="your-secret-key"
     export AWS_SESSION_TOKEN="your-session-token"  # Optional
     python api_gateway_scanner.py --region all
     ```
+
 2.  **Command Line Arguments**
-    ```sh
+
+    ```bash
     python api_gateway_scanner.py --region all \
       --access-key AKIA... \
       --secret-key wJalrXUt... \
       --session-token IQoJb3Jp...
     ```
+
 3.  **AWS Profiles**
-    ```sh
+
+    ```bash
     # Use named profile
     python api_gateway_scanner.py --region all --profile production
 
     # Use SSO profile
     python api_gateway_scanner.py --region all --profile sso-admin
     ```
+    
 4.  **Default Credentials**
-    ```sh
+
+    ```bash
     # Uses ~/.aws/credentials or IAM role
     python api_gateway_scanner.py --region all
     ```
@@ -218,7 +228,7 @@ The enhanced verbose mode provides detailed insights into the scanning process a
 
 ### Enable Verbose Mode
 
-```sh
+```bash
 python api_gateway_scanner.py --region us-east-1 --verbose
 ```
 
@@ -235,21 +245,20 @@ INFO:APIWatchDog:[us-east-1] Scanning HTTP/WebSocket (v2) APIs...
 INFO:APIWatchDog:[us-east-1] Scanning Custom Domains (v1)...
 INFO:APIWatchDog:[us-east-1] Scanning API Keys...
 INFO:APIWatchDog:[us-east-1] Scanning VPC Endpoints...
-INFO:APIWatchDog:Finished scan of region: us-east-1.
-Found 3 potential findings.
+INFO:APIWatchDog:Finished scan of region: us-east-1. Found 3 potential findings.
 ```
 
 ### Debug Information Includes:
 
-  * **Connection Status**: Confirmation of AWS service connectivity
-  * **API Discovery**: Number of APIs found in each region
-  * **Policy Retrieval**: Multiple methods attempted for policy access
-  * **Error Analysis**: Specific error types and suggested solutions
-  * **Risk Assessment**: Real-time analysis results
+  * **Connection Status:** Confirmation of AWS service connectivity
+  * **API Discovery:** Number of APIs found in each region
+  * **Policy Retrieval:** Multiple methods attempted for policy access
+  * **Error Analysis:** Specific error types and suggested solutions
+  * **Risk Assessment:** Real-time analysis results
 
 ### Save Debug Output
 
-```sh
+```bash
 # Save all output to file for analysis
 python api_gateway_scanner.py --region all --verbose 2>&1 | tee debug_output.log
 
@@ -309,19 +318,19 @@ A standard CSV file with one row per finding.
 
 Findings are categorized by risk level to help you prioritize remediation.
 
-| Risk Level | Color | Description |
-| :--- | :--- | :--- |
-| **CRITICAL** | Red | Immediate Exploit - An unauthenticated public endpoint, an exposed `$default` route, or a fully exposed private API. |
-| **HIGH** | Orange | Significant Risk - A potential SSRF, a MOCK integration in prod, or a very weak authorizer. |
-| **MEDIUM** | Yellow | Security Hygiene - Missing WAF, disabled logging, unrotated keys, or permissive CORS/VPC Endpoint policies. |
-| **LOW** | Dim | Informational - Missing tracing, short Lambda timeouts, or use of VTL mapping (requires review). |
-| **INFO** | Blue | Context - AWS Shield Advanced is enabled. |
+| Risk Level | Color | Description | Action Required |
+| :--- | :--- | :--- | :--- |
+| **CRITICAL** | Red | Immediate Exploit - An unauthenticated public endpoint, an exposed `$default` route, or a fully exposed private API. | Immediate action required |
+| **HIGH** | Orange | Significant Risk - A potential SSRF, a MOCK integration in prod, or a very weak authorizer. | Review and restrict access |
+| **MEDIUM** | Yellow | Security Hygiene - Missing WAF, disabled logging, unrotated keys, or permissive CORS/VPC Endpoint policies. | Consider improvements |
+| **LOW** | Dim | Informational - Missing tracing, short Lambda timeouts, or use of VTL mapping (requires review). | Review configuration |
+| **INFO** | Blue | Context - AWS Shield Advanced is enabled. | Information only |
 
 ## 💡 Examples
 
 ### Comprehensive Security Audit with Debugging
 
-```sh
+```bash
 # Scan all regions with full export and verbose logging
 python api_gateway_scanner.py \
   --region all \
@@ -332,7 +341,7 @@ python api_gateway_scanner.py \
 
 ### Troubleshooting Specific Region
 
-```sh
+```bash
 # Debug issues in a specific region
 python api_gateway_scanner.py \
   --region us-east-1 \
@@ -342,7 +351,7 @@ python api_gateway_scanner.py \
 
 ### Multi-Account Scanning with Verbose Output
 
-```sh
+```bash
 # Scan production account with detailed logging
 python api_gateway_scanner.py --region all --profile prod-account --verbose
 
@@ -355,7 +364,7 @@ python api_gateway_scanner.py --region all --profile staging-account --verbose -
 
 ### Continuous Integration with Enhanced Logging
 
-```sh
+```bash
 #!/bin/bash
 # CI/CD pipeline integration with verbose output
 python api_gateway_scanner.py --region all --verbose --export json --output scan_results.json
@@ -375,50 +384,52 @@ fi
 
 ### Automated Reporting with Debug Information
 
-```sh
+```bash
 # Generate daily security report with full debugging
 python api_gateway_scanner.py \
   --region all \
   --verbose \
   --export csv \
   --output "daily_scan_$(date +%Y%m%d_%H%M%S).csv" \
-  2>&1 | tee "daily_scan_debug_$(date +G%Y%m%d_%H%M%S).log"
+  2>&1 | tee "daily_scan_debug_$(date +%Y%m%d_%H%M%S).log"
 ```
 
 ## 📋 Requirements
 
 ### System Requirements
 
-  * **Python**: 3.7 or higher
-  * `pip install -r requirements.txt`
+  * **Python:** 3.7 or higher
+  * **Memory:** 256MB minimum
+  * **Network:** Internet access to AWS APIs
+  * **Disk:** 50MB for dependencies
 
 ### AWS Permissions
 
-The tool needs a read-only IAM policy. This policy provides the *minimum* permissions required for all checks.
+The tool needs a read-only IAM policy. This policy provides the minimum permissions required for all checks.
 
 ```json
 {
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "APIWatchDogReadOnly",
-      "Effect": "Allow",
-      "Action": [
-        "apigateway:GET",
-        "apigatewayv2:GET",
-        "lambda:GetFunctionConfiguration",
-        "lambda:GetPolicy",
-        "lambda:ListFunctions",
-        "ec2:DescribeVpcEndpoints",
-        "wafv2:ListWebACLs",
-        "wafv2:ListResourcesForWebACL",
-        "shield:DescribeSubscription",
-        "sts:GetCallerIdentity",
-        "ec2:DescribeRegions"
-      ],
-      "Resource": "*"
-    }
-  ]
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "APIWatchDogReadOnly",
+            "Effect": "Allow",
+            "Action": [
+                "apigateway:GET",
+                "apigatewayv2:GET",
+                "lambda:GetFunctionConfiguration",
+                "lambda:GetPolicy",
+                "lambda:ListFunctions",
+                "ec2:DescribeVpcEndpoints",
+                "wafv2:ListWebACLs",
+                "wafv2:ListResourcesForWebACL",
+                "shield:DescribeSubscription",
+                "sts:GetCallerIdentity",
+                "ec2:DescribeRegions"
+            ],
+            "Resource": "*"
+        }
+    ]
 }
 ```
 
@@ -433,9 +444,9 @@ The tool needs a read-only IAM policy. This policy provides the *minimum* permis
 
 **Authentication Errors**
 
-  * **Error:** `Unable to locate credentials`
-  * **Solution**: Ensure AWS credentials are properly configured
-    ```sh
+  * **Error:** Unable to locate credentials
+  * **Solution:** Ensure AWS credentials are properly configured
+    ```bash
     aws configure list
     # or
     export AWS_ACCESS_KEY_ID="your-key"
@@ -444,23 +455,33 @@ The tool needs a read-only IAM policy. This policy provides the *minimum* permis
 
 **Permission Denied**
 
-  * **Error:** `User is not authorized to perform: apigateway:GET`
-  * **Solution**: Add required IAM permissions to your user/role (see Requirements).
+  * **Error:** User is not authorized to perform: apigateway:GET
+  * **Solution:** Add required IAM permissions to your user/role (see Requirements).
 
 **Connection Timeouts**
 
-  * **Error:** `Connection timeout`
-  * Two. **Solution**: Check internet connectivity and AWS service status. The scanner includes retry logic for transient failures.
+  * **Error:** Connection timeout
+  * **Solution:** Check internet connectivity and AWS service status. The scanner includes retry logic for transient failures.
 
 ### Getting Help
 
-```sh
+```bash
 python api_gateway_scanner.py --help
 ```
 
 ## 🤝 Contributing
 
-Contributions are welcome\! Please feel free to open a GitHub Issue for bugs or a Pull Request for new features.
+We welcome contributions\! Please see our Contributing Guidelines for details.
+
+**Development Setup**
+
+```bash
+git clone https://github.com/ved-ant-jain/APIWatchDog.git
+cd APIWatchDog
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
 
 ## ⚖️ Disclaimer
 
@@ -476,4 +497,4 @@ The authors are not responsible for any misuse of this tool or any damages resul
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the `LICENSE` file for details.
+This project is licensed under the MIT License - see the LICENSE file for details.

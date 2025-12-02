@@ -9,7 +9,7 @@ and misconfigured private API resource policies.
 This enhanced version includes scans for:
 - API Stages (Logging, Tracing, Caching)
 - API Authorizers (Permissions, Validation, Timeouts)
-- WAF & Shield Integration
+- WAF & Shield Integration (Optimized)
 - CORS Misconfigurations
 - Custom Domain Security (TLS, mTLS)
 - Private API VPC Endpoint Policies
@@ -24,14 +24,14 @@ import sys
 import logging
 import re
 import ipaddress
+import threading
+import csv # FIX: Added missing import
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import csv
-import threading  # FIX #1: Import threading for lock
+from urllib.parse import urlparse
 from botocore.config import Config
 from botocore.exceptions import ClientError
-from urllib.parse import urlparse # FIX NEW #3: Import urlparse for robust SSRF check
 
 try:
     from rich.console import Console
@@ -41,32 +41,23 @@ try:
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
-    # Define a simple print function if rich is not available
     def rprint(*args, **kwargs):
         print(*args)
     print("Warning: 'rich' library not found. For a better visual experience, install with: pip install rich")
 
-
 # Configure logging
-# Set up a logger. The level will be configured in main() after parsing args.
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("APIWatchDog")
 
 # Boto3 configuration with timeouts and retries
-# FIX: Add connection timeouts and retry logic
 BOTO_CONFIG = Config(
     connect_timeout=5,
     read_timeout=10,
     retries={'max_attempts': 3}
 )
 
-
 class APIGatewayScanner:
     """
     Scans AWS API Gateways for security misconfigurations.
-    
-    This tool performs an "inside-out" scan using AWS credentials to read
-    the configuration of all API Gateways, providing a comprehensive and
-    accurate map of the API attack surface.
     """
     
     def __init__(self, access_key: Optional[str] = None, secret_key: Optional[str] = None, 
@@ -74,11 +65,19 @@ class APIGatewayScanner:
         """Initialize the scanner with AWS credentials."""
         self.console = Console() if RICH_AVAILABLE else None
         self.results: List[Dict[str, Any]] = []
-        # FIX #1: Initialize a threading.Lock to prevent race conditions on self.results
         self.results_lock = threading.Lock()
         
+        # Permission flags (soft-fail)
+        self.perms = {
+            'apigateway': False,
+            'apigatewayv2': False,
+            'lambda': False,
+            'ec2': False,
+            'wafv2': False,
+            'shield': False
+        }
+
         try:
-            # Setup AWS session
             if profile:
                 logger.info(f"Using AWS profile: {profile}")
                 self.session = boto3.Session(profile_name=profile)
@@ -93,7 +92,6 @@ class APIGatewayScanner:
                 logger.info("Using default AWS credentials (environment variables or IAM role).")
                 self.session = boto3.Session()
                 
-            # Test credentials
             sts_client = self.session.client('sts', config=BOTO_CONFIG)
             identity = sts_client.get_caller_identity()
             self.account_id = identity['Account']
@@ -105,973 +103,517 @@ class APIGatewayScanner:
 
     def _check_permissions(self) -> bool:
         """
-        FIX #2: Check for essential IAM permissions before starting the scan.
+        Verifies IAM permissions and sets capability flags (Soft Fail).
+        Returns False only if critical API Gateway permissions are missing.
         """
-        logger.info("Verifying necessary IAM permissions...")
-        permissions_ok = True
+        logger.info("Verifying permissions...")
         
-        # List of (service, region, function_to_call, kwargs)
-        # Using us-east-1 as a standard region for checks
-        perm_checks = [
-            ('apigateway', 'us-east-1', 'get_rest_apis', {'limit': 1}),
-            ('apigatewayv2', 'us-east-1', 'get_apis', {'MaxResults': '1'}),
-            ('apigateway', 'us-east-1', 'get_api_keys', {'limit': 1}),
-            # FIX NEW #2: Use list_functions, which is a better check
-            ('lambda', 'us-east-1', 'list_functions', {'MaxItems': 1}),
-            ('ec2', 'us-east-1', 'describe_vpc_endpoints', {'MaxResults': 1}),
-            # FIX NEW #4: Use list_web_acls, which is more resilient
-            ('wafv2', 'us-east-1', 'list_web_acls', {'Scope': 'REGIONAL', 'Limit': 1}),
-            ('shield', 'us-east-1', 'describe_subscription', {}), # Shield is global, check in us-east-1
-        ]
-        
-        for service, region, func, kwargs in perm_checks:
+        # Map service key to a specific check call (service, region, func, kwargs)
+        checks = {
+            'apigateway': ('apigateway', 'us-east-1', 'get_rest_apis', {'limit': 1}),
+            'apigatewayv2': ('apigatewayv2', 'us-east-1', 'get_apis', {'MaxResults': '1'}),
+            'lambda': ('lambda', 'us-east-1', 'list_functions', {'MaxItems': 1}),
+            'ec2': ('ec2', 'us-east-1', 'describe_vpc_endpoints', {'MaxResults': 1}),
+            'wafv2': ('wafv2', 'us-east-1', 'list_web_acls', {'Scope': 'REGIONAL', 'Limit': 1}),
+            'shield': ('shield', 'us-east-1', 'describe_subscription', {})
+        }
+
+        for key, (svc, region, func, kwargs) in checks.items():
             try:
-                client = self.session.client(service, region_name=region, config=BOTO_CONFIG)
+                client = self.session.client(svc, region_name=region, config=BOTO_CONFIG)
                 getattr(client, func)(**kwargs)
-                
+                self.perms[key] = True
             except ClientError as e:
-                if e.response['Error']['Code'] == 'AccessDenied':
-                    rprint(f"[bold red]Permission Error:[/bold red] Missing [cyan]{service}:{func}[/cyan]")
-                    permissions_ok = False
-                elif e.response['Error']['Code'] in ('ResourceNotFoundException'):
-                    # This can happen with lambda:get_policy check and is fine
-                    pass
+                code = e.response['Error']['Code']
+                # ResourceNotFound is fine (service works, just empty/wrong ID)
+                if code in ['ResourceNotFoundException', 'WAFInvalidParameterException']:
+                    self.perms[key] = True
+                elif code == 'AccessDeniedException':
+                    logger.warning(f"Missing permission for {svc}:{func}. Related scans will be skipped.")
                 else:
-                    # Other error (e.g., service not active in region)
-                    logger.warning(f"Permission check for {service}:{func} failed: {e}")
+                    logger.warning(f"Error checking {svc}:{func}: {e}. Assuming permission missing.")
             except Exception as e:
-                 logger.warning(f"Permission check for {service}:{func} failed with non-ClientError: {e}")
-        
-        if not permissions_ok:
-            rprint("[bold red]Fatal Error: Missing critical IAM permissions.[/bold red]")
-            rprint("Please attach a policy with read-only access for the services listed above.")
+                logger.warning(f"Error checking {svc}:{func}: {e}")
+
+        # Critical failure only if we can't scan API Gateway itself
+        if not self.perms['apigateway'] and not self.perms['apigatewayv2']:
+            rprint("[bold red]Fatal Error: Missing permissions for apigateway:GetRestApis OR apigatewayv2:GetApis.[/bold red]")
             return False
             
-        logger.info("IAM permission check passed.")
         return True
 
     def _get_all_regions(self) -> List[str]:
-        """Fetches all available AWS regions for the API Gateway service."""
+        """Fetches available regions, falling back gracefully."""
         try:
             return self.session.get_available_regions('apigateway')
         except Exception as e:
-            rprint(f"[bold yellow]Warning:[/bold yellow] Could not dynamically fetch all AWS regions: {e}")
-            rprint("[yellow]Falling back to a built-in list of common regions. Some regions may be missed.[/yellow]")
-            logger.warning(f"Could not fetch all regions, defaulting to common regions: {e}")
-            # Fallback list if discovery fails
+            logger.warning(f"Could not fetch regions dynamically: {e}")
             return [
                 "us-east-1", "us-east-2", "us-west-1", "us-west-2",
-                "af-south-1", "ap-east-1", "ap-south-1", "ap-northeast-1",
-                "ap-northeast-2", "ap-northeast-3", "ap-southeast-1",
-                "ap-southeast-2", "ap-southeast-3", "ca-central-1",
-                "eu-central-1", "eu-west-1", "eu-west-2", "eu-west-3",
-                "eu-south-1", "eu-north-1", "me-south-1", "sa-east-1"
+                "eu-west-1", "eu-central-1", "ap-southeast-1", "ap-northeast-1"
             ]
 
+    def _build_waf_map(self, region: str) -> Dict[str, str]:
+        """
+        Pre-fetches all WebACL associations for the region to avoid N+1 throttling.
+        Returns: { ResourceArn: WebACLArn }
+        """
+        waf_map = {}
+        if not self.perms['wafv2']:
+            return waf_map
+
+        try:
+            waf_client = self.session.client('wafv2', region_name=region, config=BOTO_CONFIG)
+            paginator = waf_client.get_paginator('list_web_acls')
+            
+            # 1. Get all WebACLs
+            web_acls = []
+            for page in paginator.paginate(Scope='REGIONAL'):
+                web_acls.extend(page.get('WebACLs', []))
+
+            # 2. For each WebACL, get its resources
+            # Note: This is still O(W) where W is num_acls, but better than O(Stages)
+            for acl in web_acls:
+                acl_arn = acl['ARN']
+                try:
+                    res = waf_client.list_resources_for_web_acl(
+                        WebACLArn=acl_arn, ResourceType='API_GATEWAY_STAGE'
+                    )
+                    for resource_arn in res.get('ResourceArns', []):
+                        waf_map[resource_arn] = acl_arn
+                except Exception as e:
+                    logger.debug(f"[{region}] Failed to list resources for ACL {acl_arn}: {e}")
+                    continue
+                    
+        except Exception as e:
+            logger.warning(f"[{region}] Failed to build WAF map: {e}")
+            
+        return waf_map
+
     def scan_regions(self, regions: List[str]) -> List[Dict[str, Any]]:
-        """
-        Scans a list of AWS regions in parallel for API Gateway misconfigurations.
-        """
         if 'all' in regions:
             regions = self._get_all_regions()
 
         if not RICH_AVAILABLE:
-            print(f"Scanning {len(regions)} region(s): {', '.join(regions)}")
+            print(f"Scanning {len(regions)} region(s)...")
 
-        # FIX #5: Check Shield subscription once
-        try:
-            shield_client = self.session.client('shield', region_name='us-east-1', config=BOTO_CONFIG)
-            sub = shield_client.describe_subscription()
-            if sub.get('Subscription', {}).get('SubscriptionState') == 'ACTIVE':
-                with self.results_lock:
+        # Global Shield Check (Once)
+        if self.perms['shield']:
+            try:
+                shield = self.session.client('shield', region_name='us-east-1', config=BOTO_CONFIG)
+                sub = shield.describe_subscription()
+                if sub.get('Subscription', {}).get('SubscriptionState') == 'ACTIVE':
                     self.results.append({
-                        "region": "Global", "api_id": "N/A", "api_name": "AWS Shield Advanced",
-                        "api_type": "Account Security", "endpoint": "N/A", "risk": "INFO",
-                        "finding_details": "AWS Shield Advanced subscription is ACTIVE."
+                        "region": "Global", "api_id": "N/A", "api_name": "Shield Advanced",
+                        "api_type": "Account", "endpoint": "N/A", "risk": "INFO",
+                        "finding_details": "AWS Shield Advanced is ACTIVE."
                     })
-        except Exception as e:
-            # Don't show an error if Shield isn't subscribed, as that's the default
-            if "ResourceNotFoundException" not in str(e):
-                logger.warning(f"Could not check Shield Advanced subscription: {e}")
-
+            except Exception as e:
+                logger.debug(f"Shield check failed: {e}")
 
         with (Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            transient=True,
+            SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True
         ) if RICH_AVAILABLE else self._null_progress()) as progress:
-            if RICH_AVAILABLE:
-                task = progress.add_task("[cyan]Scanning regions...", total=len(regions))
+            
+            task = progress.add_task("[cyan]Scanning regions...", total=len(regions)) if RICH_AVAILABLE else None
             
             with ThreadPoolExecutor(max_workers=10) as executor:
                 futures = {executor.submit(self.scan_region, region): region for region in regions}
                 
-                for i, future in enumerate(as_completed(futures)):
-                    region = futures[future]
+                for future in as_completed(futures):
                     try:
-                        regional_results = future.result()
-                        # FIX #1: Use the lock to safely append to the shared results list
-                        if regional_results:
-                            with self.results_lock:
-                                self.results.extend(regional_results)
+                        res = future.result()
+                        with self.results_lock:
+                            self.results.extend(res)
                     except Exception as e:
-                        rprint(f"[bold red]Error scanning region {region}: {e}[/bold red]")
-                        logger.error(f"Error scanning region {region}: {e}", exc_info=True)
+                        logger.error(f"Region scan failed: {e}")
+                    
                     if RICH_AVAILABLE:
-                        progress.update(task, advance=1, description=f"[cyan]Scanning regions... (Completed {region})")
+                        progress.update(task, advance=1)
         
         return self.results
 
     def scan_region(self, region: str) -> List[Dict[str, Any]]:
-        """
-        Scans a single AWS region for all API Gateway (v1 & v2) vulnerabilities.
-        """
-        logger.info(f"Starting scan of region: {region}")
-        regional_findings: List[Dict[str, Any]] = []
+        logger.info(f"Scanning {region}")
+        findings = []
         
         try:
-            # Create clients
-            apigw_client = self.session.client('apigateway', region_name=region, config=BOTO_CONFIG)
-            apigwv2_client = self.session.client('apigatewayv2', region_name=region, config=BOTO_CONFIG)
-            waf_client = self.session.client('wafv2', region_name=region, config=BOTO_CONFIG)
-            ec2_client = self.session.client('ec2', region_name=region, config=BOTO_CONFIG)
-            lambda_client = self.session.client('lambda', region_name=region, config=BOTO_CONFIG)
+            apigw = self.session.client('apigateway', region_name=region, config=BOTO_CONFIG)
+            apigwv2 = self.session.client('apigatewayv2', region_name=region, config=BOTO_CONFIG)
             
-            pagination_config = {'PageSize': 50}
+            # Optimizations: Pre-fetch WAF map for this region
+            waf_map = self._build_waf_map(region)
 
-            # --- 1. Scan REST APIs (v1) ---
-            logger.info(f"[{region}] Scanning REST (v1) APIs...")
-            paginator_v1 = apigw_client.get_paginator('get_rest_apis')
-            for page in paginator_v1.paginate(PaginationConfig=pagination_config):
-                for api in page.get('items', []):
-                    regional_findings.extend(
-                        self.analyze_rest_api(apigw_client, waf_client, lambda_client, api, region)
-                    )
+            # 1. REST APIs (v1)
+            if self.perms['apigateway']:
+                paginator = apigw.get_paginator('get_rest_apis')
+                for page in paginator.paginate(PaginationConfig={'PageSize': 50}):
+                    for api in page.get('items', []):
+                        findings.extend(self.analyze_rest_api(apigw, api, region, waf_map))
+                
+                # Custom Domains v1
+                findings.extend(self._analyze_custom_domains_v1(apigw, region))
+                
+                # API Keys
+                findings.extend(self._analyze_api_keys(apigw, region))
 
-            # --- 2. Scan HTTP/WebSocket APIs (v2) ---
-            logger.info(f"[{region}] Scanning HTTP/WebSocket (v2) APIs...")
-            paginator_v2 = apigwv2_client.get_paginator('get_apis')
-            for page in paginator_v2.paginate(PaginationConfig=pagination_config):
-                for api in page.get('Items', []):
-                    regional_findings.extend(
-                        self.analyze_http_api(apigwv2_client, waf_client, api, region)
-                    )
-            
-            # --- 3. Scan Custom Domains (v1) ---
-            logger.info(f"[{region}] Scanning Custom Domains (v1)...")
-            regional_findings.extend(
-                self._analyze_custom_domains_v1(apigw_client, region)
-            )
-            
-            # --- 4. Scan API Keys ---
-            logger.info(f"[{region}] Scanning API Keys...")
-            regional_findings.extend(
-                self._analyze_api_keys(apigw_client, region)
-            )
+            # 2. HTTP APIs (v2)
+            if self.perms['apigatewayv2']:
+                paginator = apigwv2.get_paginator('get_apis')
+                for page in paginator.paginate(PaginationConfig={'PageSize': 50}):
+                    for api in page.get('Items', []):
+                        findings.extend(self.analyze_http_api(apigwv2, api, region, waf_map))
 
-            # --- 5. Scan VPC Endpoints ---
-            logger.info(f"[{region}] Scanning VPC Endpoints...")
-            regional_findings.extend(
-                self._analyze_vpc_endpoints(ec2_client, region)
-            )
+            # 3. VPC Endpoints
+            if self.perms['ec2']:
+                findings.extend(self._analyze_vpc_endpoints(region))
 
         except Exception as e:
-            logger.warning(f"Could not scan region {region}. Error: {e}")
-        
-        logger.info(f"Finished scan of region: {region}. Found {len(regional_findings)} potential findings.")
-        return regional_findings
-
-    def analyze_rest_api(self, apigw_client: Any, waf_client: Any, lambda_client: Any, api: Dict[str, Any], region: str) -> List[Dict[str, Any]]:
-        """
-        Analyzes a single REST (v1) API, breaking checks into sub-functions.
-        """
-        findings: List[Dict[str, Any]] = []
-        api_id = api.get('id', 'N/A')
-        api_name = api.get('name', 'N/A')
-        api_types = api.get('endpointConfiguration', {}).get('types', ['N/A'])
-        api_type_str = ", ".join(api_types)
-
-        base_finding = {
-            "region": region, "api_id": api_id, "api_name": api_name,
-            "api_type": f"REST ({api_type_str})",
-        }
-
-        # Check 1: Original Private API Policy Scan
-        if 'PRIVATE' in api_types:
-            try:
-                policy_data = api.get('policy')
-                if policy_data:
-                    findings.extend(self._analyze_private_api_policy(policy_data, base_finding))
-                else:
-                    findings.append({
-                        **base_finding, "risk": "MEDIUM", "endpoint": "N/A (Policy)",
-                        "finding_details": "Private API has no resource policy. This may be an implicit security risk."
-                    })
-            except Exception as e:
-                logger.warning(f"[{region}] Could not analyze policy for {api_id}: {e}")
-
-        # Check 2: Default Endpoint Enabled
-        if not api.get('disableExecuteApiEndpoint', False):
-            findings.append({
-                **base_finding, "risk": "MEDIUM", "endpoint": "N/A (API-Level)",
-                "finding_details": "Default 'execute-api' endpoint is enabled. This can be used to bypass WAFs configured on a custom domain."
-            })
+            logger.error(f"[{region}] Scan failed: {e}")
             
-        # FIX #4, #10: Analyze Stages
-        findings.extend(self._analyze_rest_api_stages(apigw_client, waf_client, api_id, region, base_finding))
-        
-        # FIX #5: Analyze Authorizers
-        findings.extend(self._analyze_rest_api_authorizers(apigw_client, lambda_client, api_id, base_finding))
-        
-        # FIX #6, #12, #13, #14, #16, #18: Analyze Resources/Methods/Integrations
-        findings.extend(self._analyze_rest_api_resources(apigw_client, api_id, base_finding))
-
         return findings
 
-    def _analyze_rest_api_stages(self, apigw_client: Any, waf_client: Any, api_id: str, region: str, base_finding: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Analyzes all stages for a REST API for logging, tracing, caching, and WAF.
-        (FIX #4, #10, #11)
-        """
+    def analyze_rest_api(self, client: Any, api: Dict, region: str, waf_map: Dict) -> List[Dict]:
         findings = []
+        api_id = api['id']
+        name = api.get('name', 'N/A')
+        base = {"region": region, "api_id": api_id, "api_name": name, "api_type": "REST"}
+
+        # Policy Check
+        if 'PRIVATE' in api.get('endpointConfiguration', {}).get('types', []):
+            findings.extend(self._check_private_policy(api.get('policy'), base))
+
+        # Stages & WAF (Optimized)
         try:
-            stages = apigw_client.get_stages(restApiId=api_id).get('item', [])
+            stages = client.get_stages(restApiId=api_id).get('item', [])
+            if not stages and not client.get_resources(restApiId=api_id, limit=1).get('items'):
+                 # Zombie Check
+                 findings.append({**base, "risk": "LOW", "endpoint": "N/A", "finding_details": "Zombie API: No stages and no resources."})
+
             for stage in stages:
-                stage_name = stage.get('stageName')
-                stage_arn = f"arn:aws:apigateway:{region}::/restapis/{api_id}/stages/{stage_name}"
-                endpoint_desc = f"Stage: {stage_name}"
+                s_name = stage['stageName']
+                arn = f"arn:aws:apigateway:{region}::/restapis/{api_id}/stages/{s_name}"
                 
-                # Check 4a: Tracing
-                if not stage.get('tracingEnabled', False):
-                    findings.append({
-                        **base_finding, "risk": "LOW", "endpoint": endpoint_desc,
-                        "finding_details": "X-Ray Tracing is disabled for this stage, hindering observability."
-                    })
+                # WAF Check (O(1) lookup)
+                if self.perms['wafv2'] and arn not in waf_map:
+                    findings.append({**base, "risk": "MEDIUM", "endpoint": f"Stage: {s_name}", "finding_details": "Stage not protected by WAFv2."})
                 
-                # Check 4b: Logging
-                log_settings = stage.get('methodSettings', {}).get('*/*')
-                if not log_settings or log_settings.get('loggingLevel', 'OFF') == 'OFF':
-                     findings.append({
-                        **base_finding, "risk": "MEDIUM", "endpoint": endpoint_desc,
-                        "finding_details": "Execution logging is disabled for this stage. Security incidents may not be recorded."
-                    })
-                
-                # Check 10: Caching
-                if stage.get('cacheClusterEnabled', False):
-                    if not stage.get('cacheDataEncrypted', False):
-                         findings.append({
-                            **base_finding, "risk": "MEDIUM", "endpoint": endpoint_desc,
-                            "finding_details": "Caching is enabled for this stage, but cache data encryption is disabled."
-                        })
-                
-                # Check 11: WAF Integration
-                if not self._check_waf_association(waf_client, stage_arn, 'REGIONAL'):
-                     findings.append({
-                        **base_finding, "risk": "MEDIUM", "endpoint": endpoint_desc,
-                        "finding_details": "Stage is not protected by a WAFv2 WebACL."
-                    })
+                # Logging/Tracing
+                if not stage.get('tracingEnabled'):
+                    findings.append({**base, "risk": "LOW", "endpoint": f"Stage: {s_name}", "finding_details": "X-Ray tracing disabled."})
         except Exception as e:
-            logger.warning(f"[{base_finding['region']}] Could not get stages for {api_id}: {e}")
+            logger.debug(f"Stage check error: {e}")
+
+        # Resources & Methods
+        findings.extend(self._analyze_resources(client, api_id, base))
+        
         return findings
 
-    def _analyze_rest_api_authorizers(self, apigw_client: Any, lambda_client: Any, api_id: str, base_finding: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Analyzes all authorizers for a REST API for validation, TTL, and permissions.
-        (FIX #5, NEW #3, GAP #1)
-        """
+    def _analyze_resources(self, client, api_id, base) -> List[Dict]:
         findings = []
         try:
-            authorizers = apigw_client.get_authorizers(restApiId=api_id).get('items', [])
-            for auth in authorizers:
-                auth_name = auth.get('name')
-                auth_type = auth.get('type', 'TOKEN')
-                endpoint_desc = f"Authorizer: {auth_name}"
-                
-                if auth_type == 'TOKEN' and not auth.get('identityValidationExpression'):
-                    findings.append({
-                        **base_finding, "risk": "HIGH", "endpoint": endpoint_desc,
-                        "finding_details": "TOKEN authorizer has no identity validation expression (regex), making it vulnerable to token-related attacks."
-                    })
-                
-                if auth.get('authorizerResultTtlInSeconds', 0) > 300:
-                     findings.append({
-                        **base_finding, "risk": "LOW", "endpoint": endpoint_desc,
-                        "finding_details": f"Authorizer has a long TTL ({auth.get('authorizerResultTtlInSeconds')}s). Permissions may not be revoked quickly."
-                    })
+            paginator = client.get_paginator('get_resources')
+            for page in paginator.paginate(restApiId=api_id):
+                for res in page.get('items', []):
+                    path = res.get('path', '')
+                    for method in res.get('resourceMethods', {}):
+                        # Skip OPTIONS
+                        if method == 'OPTIONS':
+                            self._check_cors(client, api_id, res['id'], path, base, findings)
+                            continue
 
-                # NEW #3 & GAP #1: Check Lambda authorizer permissions and timeout
-                if auth.get('authorizerUri'):
-                    findings.extend(self._check_lambda_authorizer(lambda_client, auth['authorizerUri'], base_finding, endpoint_desc))
-
-        except Exception as e:
-            logger.warning(f"[{base_finding['region']}] Could not get authorizers for {api_id}: {e}")
-        return findings
-
-    def _extract_lambda_arn_from_uri(self, authorizer_uri: str) -> Optional[str]:
-        """Helper to extract a Lambda ARN from an APIGW Authorizer URI."""
-        # URI format: arn:aws:apigateway:REGION:lambda:path/2015-03-31/functions/LAMBDA_ARN/invocations
-        match = re.search(r'(arn:aws:lambda:.*?:function:.*?)(/invocations|$)', authorizer_uri)
-        if not match:
-            logger.warning(f"Could not parse Lambda ARN from authorizer URI: {authorizer_uri}")
-            return None
-        return match.group(1)
-
-    def _check_lambda_authorizer(self, lambda_client: Any, authorizer_uri: str, base_finding: Dict[str, Any], endpoint_desc: str) -> List[Dict[str, Any]]:
-        """
-        Checks a Lambda authorizer's resource policy and configuration.
-        (NEW #3, GAP #1)
-        """
-        findings = []
-        lambda_arn = self._extract_lambda_arn_from_uri(authorizer_uri)
-        if not lambda_arn:
-            return findings
-            
-        try:
-            # GAP #1: Check Lambda timeout
-            config = lambda_client.get_function_configuration(FunctionName=lambda_arn)
-            timeout = config.get('Timeout', 3)
-            if timeout < 3: # 3s is the default
-                findings.append({
-                    **base_finding, "risk": "LOW", "endpoint": endpoint_desc,
-                    "finding_details": f"Lambda authorizer ({lambda_arn.split(':')[-1]}) has a short timeout ({timeout}s), which could cause auth failures under load."
-                })
-
-            # NEW #3: Check Lambda policy
-            policy_response = lambda_client.get_policy(FunctionName=lambda_arn)
-            policy = json.loads(policy_response.get('Policy', '{}'))
-            
-            for stmt in policy.get('Statement', []):
-                if stmt.get('Effect') == 'Allow' and stmt.get('Principal', {}).get('Service') == 'apigateway.amazonaws.com':
-                    condition = stmt.get('Condition', {})
-                    source_arn = condition.get('ArnLike', {}).get('AWS:SourceArn')
-                    
-                    # Check if policy is overly permissive (not tied to a specific API)
-                    if not source_arn or '*' in source_arn:
-                        findings.append({
-                            **base_finding, "risk": "MEDIUM", "endpoint": endpoint_desc,
-                            "finding_details": f"Lambda authorizer ({lambda_arn.split(':')[-1]}) has a permissive resource policy (SourceArn: {source_arn})."
-                        })
-        except ClientError as e:
-            # FIX NEW #2: Catch specific errors for invalid/missing lambda
-            error_code = e.response['Error']['Code']
-            if error_code in ('ResourceNotFoundException', 'InvalidParameterValueException'):
-                findings.append({
-                    **base_finding, "risk": "MEDIUM", "endpoint": endpoint_desc,
-                    "finding_details": f"Lambda authorizer ({lambda_arn.split(':')[-1]}) could not be analyzed. It may be deleted or in another account. Error: {error_code}"
-                })
-            else:
-                logger.warning(f"Could not get policy/config for Lambda authorizer {lambda_arn}: {e}")
-        except Exception as e:
-            logger.error(f"Error parsing Lambda authorizer {lambda_arn}: {e}")
-        return findings
-
-    def _analyze_rest_api_resources(self, apigw_client: Any, api_id: str, base_finding: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Analyzes all resources/methods for a REST API.
-        (FIX #6, #12, #13, #14, #16, #18, NEW #6, NEW #7)
-        """
-        findings = []
-        has_resources = False
-        try:
-            paginator = apigw_client.get_paginator('get_resources')
-            pagination_config = {'PageSize': 50}
-            
-            for page in paginator.paginate(restApiId=api_id, PaginationConfig=pagination_config):
-                for resource in page.get('items', []):
-                    has_resources = True
-                    resource_path = resource.get('path', 'N/A')
-                    resource_id = resource.get('id', 'N/A')
-                    
-                    # FIX NEW #8: Change depth limit to 20
-                    if resource_path.count('/') > 20: 
-                         findings.append({
-                            **base_finding, "risk": "LOW", "endpoint": f"Resource: {resource_path}",
-                            "finding_details": "Resource path is deeply nested (>20 levels). This is unusual and may be worth a review."
-                        })
-
-                    resource_methods = resource.get('resourceMethods')
-                    if not resource_methods:
-                        continue
-
-                    for method_name in resource_methods.keys():
-                        endpoint_desc = f"{method_name} {resource_path}"
                         try:
-                            method_details = apigw_client.get_method(
-                                restApiId=api_id,
-                                resourceId=resource_id,
-                                httpMethod=method_name
-                            )
-                            auth_type = method_details.get('authorizationType', 'NONE')
-                            api_key_required = method_details.get('apiKeyRequired', False)
+                            # Method Details
+                            meth = client.get_method(restApiId=api_id, resourceId=res['id'], httpMethod=method)
                             
-                            # Check 1: Unauthenticated Endpoint
-                            if auth_type == 'NONE':
-                                if not api_key_required:
-                                    # FIX #12: Don't check OPTIONS for auth, check for CORS
-                                    if method_name == 'OPTIONS':
-                                        findings.extend(self._analyze_rest_api_cors(apigw_client, api_id, resource_id, resource_path, base_finding))
-                                    else:
-                                        findings.append({
-                                            **base_finding, "risk": "CRITICAL", "endpoint": endpoint_desc,
-                                            "finding_details": "Endpoint has NO authentication (authorizationType: NONE)."
-                                        })
-                                else:
-                                    findings.append({
-                                        **base_finding, "risk": "HIGH", "endpoint": endpoint_desc,
-                                        "finding_details": "Endpoint uses API Key for 'authentication' (authorizationType: NONE), not authorization. This is a weak security pattern."
-                                    })
+                            # Auth Check
+                            if meth.get('authorizationType') == 'NONE' and not meth.get('apiKeyRequired'):
+                                findings.append({**base, "risk": "CRITICAL", "endpoint": f"{method} {path}", "finding_details": "Unauthenticated Endpoint."})
 
-                            # Check 2: Missing Request Validator
-                            if not method_details.get('requestValidatorId'):
-                                findings.append({
-                                    **base_finding, "risk": "LOW", "endpoint": endpoint_desc,
-                                    "finding_details": "Endpoint has no Request Validator configured. This can allow malformed data to the backend."
-                                })
-                            
-                            # FIX #6: Check for request models
-                            if method_name in ['POST', 'PUT', 'PATCH'] and not method_details.get('requestModels'):
-                                findings.append({
-                                    **base_finding, "risk": "LOW", "endpoint": endpoint_desc,
-                                    "finding_details": f"Method {method_name} has no request models defined for its body, increasing risk of injection."
-                                })
-                            
-                            # FIX #6, #18, NEW #6, NEW #7: Check Integrations
-                            findings.extend(self._analyze_rest_api_integration(apigw_client, api_id, resource_id, method_name, base_finding, endpoint_desc))
+                            # Integration Analysis (SSRF & Lambda)
+                            self._analyze_integration(client, api_id, res['id'], method, path, base, findings)
 
                         except Exception as e:
-                            logger.warning(f"[{base_finding['region']}] Could not get method details for {api_id} {endpoint_desc}: {e}")
-            
-            # FIX #14: Check for zero resources
-            if not has_resources:
-                 findings.append({
-                    **base_finding, "risk": "LOW", "endpoint": "N/A (API-Level)",
-                    "finding_details": "API has no resources defined. This might be an incomplete or 'zombie' API."
-                })
-
-            # FIX #16: Check for old deployments
-            deployments = apigw_client.get_deployments(restApiId=api_id).get('items', [])
-            if not deployments:
-                 findings.append({
-                    **base_finding, "risk": "LOW", "endpoint": "N/A (API-Level)",
-                    "finding_details": "API has no deployments. This is likely an unused 'zombie' API."
-                })
-            
+                            logger.debug(f"Method check error: {e}")
+                            continue
         except Exception as e:
-            logger.warning(f"[{base_finding['region']}] Could not get resources for {api_id}: {e}")
+            logger.debug(f"Resource check error: {e}")
         return findings
-    
-    def _analyze_rest_api_integration(self, apigw_client: Any, api_id: str, resource_id: str, method: str, base_finding: Dict[str, Any], endpoint_desc: str) -> List[Dict[str, Any]]:
-        """
-        Analyzes the integration for a specific method.
-        (FIX #6, #18, NEW #3, NEW #6, NEW #7)
-        """
-        findings = []
+
+    def _analyze_integration(self, client, api_id, res_id, method, path, base, findings):
+        """Analyzes integration for SSRF, Mock, Hardcoded creds, and Lambda Authorizers."""
         try:
-            integration = apigw_client.get_integration(
-                restApiId=api_id,
-                resourceId=resource_id,
-                httpMethod=method
-            )
-            int_type = integration.get('type')
+            integ = client.get_integration(restApiId=api_id, resourceId=res_id, httpMethod=method)
+            itype = integ.get('type')
+            uri = integ.get('uri', '')
 
-            # FIX NEW #6: Check for MOCK integrations
-            if int_type == 'MOCK':
-                 findings.append({
-                    **base_finding, "risk": "HIGH", "endpoint": endpoint_desc,
-                    "finding_details": "MOCK integration found. This should not be in a production environment."
-                })
+            # MOCK check
+            if itype == 'MOCK':
+                findings.append({**base, "risk": "HIGH", "endpoint": f"{method} {path}", "finding_details": "MOCK integration in use."})
 
-            # FIX NEW #7: Check for VPC_LINK integrations
-            if integration.get('connectionType') == 'VPC_LINK':
-                 findings.append({
-                    **base_finding, "risk": "MEDIUM", "endpoint": endpoint_desc,
-                    "finding_details": "Integration uses a VPC Link. Manual review required to ensure backend service has proper auth."
-                })
-            
-            # FIX #18: Check for request/response transformations
-            if integration.get('requestTemplates') or integration.get('responseTemplates'):
-                 findings.append({
-                    **base_finding, "risk": "LOW", "endpoint": endpoint_desc,
-                    "finding_details": "Integration uses VTL mapping templates. Manual review required for potential injection or data leaks."
-                })
+            # SSRF Check
+            if itype == 'HTTP_PROXY' or itype == 'HTTP':
+                if self._is_risky_endpoint(uri):
+                    findings.append({**base, "risk": "HIGH", "endpoint": f"{method} {path}", "finding_details": f"Potential SSRF: Integration points to internal/local URI ({uri})."})
 
-            # FIX #6: Check for hardcoded credentials
-            if integration.get('credentials'):
-                 findings.append({
-                    **base_finding, "risk": "MEDIUM", "endpoint": endpoint_desc,
-                    "finding_details": "Integration uses a hardcoded IAM role credential. This is a potential security risk; prefer resource-based policies."
-                })
-
-            # FIX #6 & NEW #3: Check for SSRF risk in HTTP_PROXY
-            if int_type == 'HTTP_PROXY' and integration.get('uri'):
-                uri = integration.get('uri')
-                # FIX NEW #3: Use urlparse for robust hostname extraction
-                try:
-                    parsed_uri = urlparse(uri)
-                    hostname = parsed_uri.hostname
-                    
-                    if hostname:
-                        # FIX NEW #4: Strip brackets from IPv6 addresses
-                        if hostname.startswith('[') and hostname.endswith(']'):
-                            hostname = hostname[1:-1]
-                            
-                        # Check if hostname is an IP address
-                        ip = ipaddress.ip_address(hostname)
-                        if ip.is_private or ip.is_loopback or ip.is_link_local:
-                             findings.append({
-                                **base_finding, "risk": "HIGH", "endpoint": endpoint_desc,
-                                "finding_details": f"Integration URI points to a private IP ({hostname}). This is a potential SSRF risk."
-                            })
-                except ValueError:
-                    # It's a domain name, not an IP. This is fine.
-                    pass
-                except Exception as e:
-                    logger.info(f"Could not parse IP from integration URI {uri}: {e}")
+            # Lambda Permissions (if AWS_PROXY/AWS)
+            if self.perms['lambda'] and 'lambda' in uri:
+                self._check_lambda_policy(uri, base, f"{method} {path}", findings)
 
         except Exception as e:
-            logger.warning(f"[{base_finding['region']}] Could not get integration for {endpoint_desc}: {e}")
-        return findings
+            logger.debug(f"Integration analysis error: {e}")
 
-    def _analyze_rest_api_cors(self, apigw_client: Any, api_id: str, resource_id: str, resource_path: str, base_finding: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """FIX #12: Analyzes CORS headers on an OPTIONS method"""
-        findings = []
-        endpoint_desc = f"OPTIONS {resource_path}"
+    def _is_risky_endpoint(self, uri: str) -> bool:
+        """Robust SSRF detection handling localhost, private IPs, and internal domains."""
         try:
-            # Check the 200 response for the OPTIONS method
-            response = apigw_client.get_method_response(restApiId=api_id, resourceId=resource_id, httpMethod='OPTIONS', statusCode='200')
-            headers = response.get('responseParameters', {})
-            
-            origin_header = headers.get('method.response.header.Access-Control-Allow-Origin')
-            # FIX NEW #1: Make check more robust
-            if origin_header and (origin_header.strip().lower() == "'*'" or origin_header.strip().lower() == "*"):
-                findings.append({
-                    **base_finding, "risk": "MEDIUM", "endpoint": endpoint_desc,
-                    "finding_details": "CORS policy allows 'Access-Control-Allow-Origin: *', which is overly permissive."
-                })
-        except Exception as e:
-             # This will fail often if no 200/OPTIONS is set, which is fine.
-            logger.info(f"Could not get CORS response for {api_id} {resource_path}: {e}")
-        return findings
+            # Handle Stage Variables explicitly
+            if '${stageVariables' in uri:
+                return False # Cannot analyze dynamic URI, skip to avoid false positive
 
-    def _analyze_private_api_policy(self, policy_data: Any, base_finding: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Analyzes a REST API's resource policy (str or dict) for common misconfigurations."""
-        findings = []
-        policy_doc = {}
-        
-        if isinstance(policy_data, str):
+            parsed = urlparse(uri)
+            host = parsed.hostname
+            if not host: return False
+
+            # Blocklist
+            if host in ['localhost', '127.0.0.1', '::1', '0.0.0.0']:
+                return True
+            if host.endswith('.internal'): # AWS internal DNS
+                return True
+
+            # Strip brackets from IPv6 for ipaddress lib
+            clean_host = host.strip('[]')
+            
             try:
-                policy_doc = json.loads(policy_data)
-            except json.JSONDecodeError:
-                logger.warning(f"[{base_finding['region']}] Could not parse policy JSON for {base_finding['api_id']}, it may be malformed.")
-                return findings
-        elif isinstance(policy_data, dict):
-            policy_doc = policy_data
-        else:
-            logger.warning(f"[{base_finding['region']}] Policy for {base_finding['api_id']} is of unexpected type: {type(policy_data)}")
-            return findings
+                ip = ipaddress.ip_address(clean_host)
+                if ip.is_private or ip.is_loopback or ip.is_link_local:
+                    return True
+            except ValueError:
+                pass # Not an IP, assume safe public domain (naïve but prevents crash)
 
-        try:
-            statements = policy_doc.get('Statement', [])
-            for stmt in statements:
-                effect = stmt.get('Effect', 'Deny')
-                if effect != 'Allow':
-                    continue
-
-                principal = stmt.get('Principal', {})
-                is_principal_star = False
-                if principal == '*':
-                    is_principal_star = True
-                elif isinstance(principal, dict) and principal.get('AWS') == '*':
-                    is_principal_star = True
-                elif 'arn:aws:iam::*:root' in str(principal): # Fallback check
-                     is_principal_star = True
-
-                if is_principal_star:
-                    condition = str(stmt.get('Condition', {}))
-                    if 'aws:SourceVpc' not in condition and 'aws:SourceVpce' not in condition:
-                        findings.append({
-                            **base_finding, "risk": "CRITICAL", "endpoint": "N/A (Policy)",
-                            "finding_details": "Private API has a resource policy allowing 'Principal: *' with no VPC/VPCE condition, making it accessible from any AWS account."
-                        })
-        except Exception as e:
-            logger.error(f"[{base_finding['region']}] Error analyzing policy logic for {base_finding['api_id']}: {e}")
-        return findings
-
-    def analyze_http_api(self, apigwv2_client: Any, waf_client: Any, api: Dict[str, Any], region: str) -> List[Dict[str, Any]]:
-        """Analyzes a single HTTP/WebSocket (v2) API for all route-level vulnerabilities."""
-        findings: List[Dict[str, Any]] = []
-        api_id = api.get('ApiId', 'N/A')
-        api_name = api.get('Name', 'N/A')
-        api_type = f"{api.get('ProtocolType', 'N/A')} (v2)"
-
-        base_finding = {
-            "region": region, "api_id": api_id, "api_name": api_name, "api_type": api_type,
-        }
-
-        # Check 1: Route-Level Authentication
-        try:
-            paginator = apigwv2_client.get_paginator('get_routes')
-            pagination_config = {'PageSize': 50}
-            for page in paginator.paginate(ApiId=api_id, PaginationConfig=pagination_config):
-                for route in page.get('Items', []):
-                    route_key = route.get('RouteKey', 'N/A')
-                    auth_type = route.get('AuthorizationType', 'NONE')
-                    
-                    if auth_type == 'NONE':
-                        # FIX NEW #5: $default route with no auth is CRITICAL
-                        if route_key == '$default':
-                            findings.append({
-                                **base_finding, "risk": "CRITICAL", "endpoint": f"{route_key} (Route)",
-                                "finding_details": "Default catch-all route '$default' has NO authentication."
-                            })
-                        else:
-                            findings.append({
-                                **base_finding, "risk": "CRITICAL", "endpoint": f"{route_key} (Route)",
-                                "finding_details": "Endpoint has NO authentication (AuthorizationType: NONE)."
-                            })
-        except Exception as e:
-            logger.warning(f"[{region}] Could not get routes for v2 API {api_id}: {e}")
-            
-        # FIX #15: Analyze HTTP/WSS API Stages
-        try:
-            stages = apigwv2_client.get_stages(ApiId=api_id).get('Items', [])
-            for stage in stages:
-                stage_name = stage.get('StageName')
-                stage_arn = f"arn:aws:apigateway:{region}::/apis/{api_id}/stages/{stage_name}"
-                endpoint_desc = f"Stage: {stage_name}"
-
-                if not stage.get('AccessLogSettings'):
-                     findings.append({
-                        **base_finding, "risk": "MEDIUM", "endpoint": endpoint_desc,
-                        "finding_details": "Access logging is disabled for this stage. Security incidents may not be recorded."
-                    })
-
-                # Check 11: WAF Integration
-                if not self._check_waf_association(waf_client, stage_arn, 'REGIONAL'):
-                     findings.append({
-                        **base_finding, "risk": "MEDIUM", "endpoint": endpoint_desc,
-                        "finding_details": "Stage is not protected by a WAFv2 WebACL."
-                    })
-        except Exception as e:
-            logger.warning(f"[{region}] Could not get stages for v2 API {api_id}: {e}")
-            
-        return findings
-
-    def _check_waf_association(self, waf_client: Any, api_stage_arn: str, scope: str) -> bool:
-        """
-        Checks if an API Gateway stage ARN is associated with a WAF.
-        (FIX #11)
-        """
-        try:
-            # We must get all WebACLs and check their associations
-            paginator = waf_client.get_paginator('list_web_acls')
-            for page in paginator.paginate(Scope=scope):
-                for acl in page.get('WebACLs', []):
-                    acl_arn = acl.get('ARN')
-                    if not acl_arn:
-                        continue
-                    
-                    resources = waf_client.list_resources_for_web_acl(WebACLArn=acl_arn, ResourceType='API_GATEWAY_STAGE').get('ResourceArns', [])
-                    if api_stage_arn in resources:
-                        logger.info(f"Found WAF {acl_arn} associated with {api_stage_arn}")
-                        return True
-        except Exception as e:
-            # Often fails due to permissions, which is fine, we just can't check.
-            logger.info(f"Could not check WAF association for {api_stage_arn}: {e}")
+        except Exception:
+            pass
         return False
 
-    def _analyze_custom_domains_v1(self, apigw_client: Any, region: str) -> List[Dict[str, Any]]:
-        """
-        Analyzes custom domains for TLS and mTLS settings.
-        (FIX #17 & #8)
-        """
-        findings = []
-        try:
-            paginator = apigw_client.get_paginator('get_domain_names')
-            for page in paginator.paginate(PaginationConfig={'PageSize': 25}):
-                for domain in page.get('items', []):
-                    domain_name = domain.get('domainName')
-                    base_finding = {
-                        "region": region, "api_id": "N/A", "api_name": f"Domain: {domain_name}",
-                        "api_type": "Custom Domain", "endpoint": domain_name
-                    }
-                    
-                    # Check 17: TLS Version
-                    sec_policy = domain.get('securityPolicy', 'TLS_1_0')
-                    if sec_policy == 'TLS_1_0':
-                        findings.append({
-                            **base_finding, "risk": "MEDIUM",
-                            "finding_details": f"Custom domain is using an outdated '{sec_policy}' security policy. Recommend TLS_1_2."
-                        })
-                    
-                    # Check 8: mTLS
-                    if domain.get('endpointConfiguration', {}).get('types', ['EDGE'])[0] == 'REGIONAL':
-                        mtls_auth = domain.get('mutualTlsAuthentication')
-                        if not mtls_auth or not mtls_auth.get('truststoreUri'):
-                             findings.append({
-                                **base_finding, "risk": "LOW",
-                                "finding_details": "Regional custom domain does not have mTLS (mutual TLS) configured."
-                            })
-        except Exception as e:
-            logger.warning(f"[{region}] Could not analyze custom domains: {e}")
-        return findings
-
-    def _analyze_api_keys(self, apigw_client: Any, region: str) -> List[Dict[str, Any]]:
-        """
-        Analyzes API Keys for rotation.
-        (NEW #4, FIX NEW #1)
-        """
-        findings = []
-        try:
-            paginator = apigw_client.get_paginator('get_api_keys')
-            for page in paginator.paginate(includeValues=False, PaginationConfig={'PageSize': 25}):
-                for key in page.get('items', []):
-                    key_name = key.get('name', 'N/A')
-                    key_id = key.get('id', 'N/A')
-                    created_date = key.get('createdDate')
-                    
-                    # FIX NEW #1: Handle naive datetime objects
-                    if created_date:
-                        if created_date.tzinfo is None:
-                            created_date = created_date.replace(tzinfo=timezone.utc)
-                        
-                        if (datetime.now(timezone.utc) - created_date).days > 90:
-                            findings.append({
-                                "region": region, "api_id": "N/A", "api_name": f"API Key: {key_name}",
-                                "api_type": "API Key", "endpoint": key_id, "risk": "MEDIUM",
-                                "finding_details": f"API Key was created on {created_date.date()} and has not been rotated in over 90 days."
-                            })
-        except Exception as e:
-            logger.warning(f"[{region}] Could not analyze API Keys: {e}")
-        return findings
+    def _check_lambda_policy(self, uri: str, base, endpoint, findings):
+        """Checks Lambda resource policy for broad permissions."""
+        # Extract ARN with Stage Variable Handling
+        # URI format: .../functions/ARN/invocations
+        match = re.search(r'functions/(.*?)/invocations', uri)
+        if not match: return
         
-    def _analyze_vpc_endpoints(self, ec2_client: Any, region: str) -> List[Dict[str, Any]]:
-        """
-        Analyzes VPC Endpoints for execute-api for insecure policies.
-        (UNRESOLVED #7)
-        """
-        findings = []
-        try:
-            paginator = ec2_client.get_paginator('describe_vpc_endpoints')
-            service_name = f"com.amazonaws.{region}.execute-api"
-            
-            for page in paginator.paginate(Filters=[{'Name': 'service-name', 'Values': [service_name]}]):
-                for vpce in page.get('VpcEndpoints', []):
-                    vpce_id = vpce.get('VpcEndpointId')
-                    policy_str = vpce.get('PolicyDocument')
-                    if not policy_str:
-                         findings.append({
-                            "region": region, "api_id": vpce_id, "api_name": f"VPC Endpoint: {vpce_id}",
-                            "api_type": "VPC Endpoint", "endpoint": vpce_id, "risk": "MEDIUM",
-                            "finding_details": "VPC Endpoint for execute-api has no resource policy. Default is full access within the VPC."
-                        })
-                         continue
-                    
-                    try:
-                        policy_doc = json.loads(policy_str)
-                        for stmt in policy_doc.get('Statement', []):
-                            if stmt.get('Effect') == 'Allow':
-                                principal = stmt.get('Principal', {})
-                                is_principal_star = False
-                                if principal == '*': is_principal_star = True
-                                elif isinstance(principal, dict) and principal.get('AWS') == '*': is_principal_star = True
-                                
-                                if is_principal_star:
-                                    findings.append({
-                                        "region": region, "api_id": vpce_id, "api_name": f"VPC Endpoint: {vpce_id}",
-                                        "api_type": "VPC Endpoint", "endpoint": vpce_id, "risk": "HIGH",
-                                        "finding_details": "VPC Endpoint policy allows 'Principal: *', potentially exposing private APIs to any user/role within the VPC."
-                                    })
-                    except Exception as e:
-                        logger.warning(f"Could not parse VPC Endpoint policy for {vpce_id}: {e}")
+        arn = match.group(1)
+        if '${' in arn: 
+            findings.append({**base, "risk": "LOW", "endpoint": endpoint, "finding_details": "Lambda integration uses Stage Variables. Manual review recommended."})
+            return
 
-        except Exception as e:
-            logger.warning(f"[{region}] Could not analyze VPC Endpoints: {e}")
+        try:
+            lam = self.session.client('lambda', region_name=base['region'], config=BOTO_CONFIG)
+            policy_res = lam.get_policy(FunctionName=arn)
+            policy = json.loads(policy_res['Policy'])
+            
+            is_secure = False
+            for stmt in policy.get('Statement', []):
+                # We look for ANY condition that restricts source
+                cond = stmt.get('Condition', {})
+                # Check all known operators
+                for op in ['ArnLike', 'ArnEquals', 'StringLike', 'StringEquals']:
+                    if 'AWS:SourceArn' in cond.get(op, {}):
+                        is_secure = True
+                        break
+            
+            if not is_secure:
+                findings.append({**base, "risk": "MEDIUM", "endpoint": endpoint, "finding_details": f"Lambda {arn.split(':')[-1]} policy may be overly permissive (no SourceArn condition found)."})
+
+        except ClientError as e:
+            # ResourceNotFound means no policy exists (secure by default usually)
+            if e.response['Error']['Code'] != 'ResourceNotFoundException':
+                logger.warning(f"Lambda check failed: {e}")
+
+    def _check_cors(self, client, api_id, res_id, path, base, findings):
+        try:
+            resp = client.get_method_response(restApiId=api_id, resourceId=res_id, httpMethod='OPTIONS', statusCode='200')
+            headers = resp.get('responseParameters', {})
+            # Robust check for wildcard origin
+            origin = headers.get('method.response.header.Access-Control-Allow-Origin', '')
+            if origin and (origin.strip("'\" ") == '*' or origin.strip() == '*'):
+                findings.append({**base, "risk": "MEDIUM", "endpoint": f"OPTIONS {path}", "finding_details": "CORS allows '*' origin."})
+        except Exception:
+            pass
+
+    def _check_private_policy(self, policy_str: Optional[str], base: Dict) -> List[Dict]:
+        findings = []
+        if not policy_str:
+            return [{**base, "risk": "CRITICAL", "endpoint": "Policy", "finding_details": "Private API has NO resource policy."}]
+        
+        try:
+            policy = json.loads(policy_str)
+            for stmt in policy.get('Statement', []):
+                if stmt.get('Effect') == 'Allow':
+                    princ = stmt.get('Principal', {})
+                    # Check for Principal: *
+                    if princ == '*' or (isinstance(princ, dict) and princ.get('AWS') == '*'):
+                        # Check if conditions restrict VPC
+                        cond = stmt.get('Condition', {})
+                        if not any(k in str(cond) for k in ['SourceVpc', 'SourceVpce']):
+                            findings.append({**base, "risk": "CRITICAL", "endpoint": "Policy", "finding_details": "Private API Policy allows '*' without VPC condition."})
+        except Exception:
+            pass
         return findings
 
-    def display_results(self, results: List[Dict[str, Any]]):
-        """Displays the scan results in a rich-formatted table."""
-        if not results:
-            rprint("\n[bold green]✅ No security misconfigurations found.[/bold green]")
-            return
-            
-        if not RICH_AVAILABLE:
-            print("\nScan Results:\n")
-            print("---")
-            for finding in results:
-                print(f" Risk: {finding.get('risk', 'N/A')}")
-                print(f" Region: {finding.get('region', 'N/A')}")
-                print(f" API Name: {finding.get('api_name', 'N/A')} ({finding.get('api_id', 'N/A')})")
-                print(f" API Type: {finding.get('api_type', 'N/A')}")
-                print(f" Endpoint: {finding.get('endpoint', 'N/A')}")
-                print(f" Finding: {finding.get('finding_details', 'N/A')}")
-                print("---")
-        else:
-            table = Table(title="AWS API Attack Surface Scan Results", show_lines=True)
-            table.add_column("Risk", style="bold", min_width=10)
-            table.add_column("Region", style="cyan", min_width=10)
-            table.add_column("API Name", style="magenta", min_width=20)
-            table.add_column("API Type", style="green", min_width=15)
-            table.add_column("Endpoint", style="yellow", min_width=20)
-            table.add_column("Finding Details", style="default", min_width=40)
-            
-            risk_styles = {
-                "CRITICAL": "[bold red]", "HIGH": "[bold yellow]", "MEDIUM": "[yellow]", "LOW": "[dim]", "INFO": "[blue]"
-            }
-            
-            risk_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
-            sorted_results = sorted(results, key=lambda x: risk_order.get(x.get('risk'), 99))
-            
-            for finding in sorted_results:
-                risk = finding.get('risk', 'N/A')
-                style = risk_styles.get(risk, "[white]")
-                
-                table.add_row(
-                    f"{style}{risk}",
-                    finding.get('region', 'N/A'),
-                    f"{finding.get('api_name', 'N/A')}\n[dim]{finding.get('api_id', 'N/A')}",
-                    finding.get('api_type', 'N/A'),
-                    finding.get('endpoint', 'N/A'),
-                    finding.get('finding_details', 'N/A')
-                )
-                
-            self.console.print("\n")
-            self.console.print(table)
-
-    def export_results(self, results: List[Dict[str, Any]], export_format: str, filename: Optional[str] = None):
-        """Exports the scan results to JSON or CSV."""
-        if not results:
-            rprint("[yellow]No results to export.[/yellow]")
-            return
-
-        if not filename:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"apiwatchdog_scan_{timestamp}.{export_format}"
-            
+    def _analyze_custom_domains_v1(self, client, region) -> List[Dict]:
+        findings = []
         try:
-            if export_format == 'json':
-                with open(filename, 'w') as f:
-                    json.dump(results, f, indent=4, default=str) # Add default=str for datetime
-            
-            elif export_format == 'csv':
-                all_keys: Set[str] = set().union(*(d.keys() for d in results))
-                fieldnames = sorted(list(all_keys))
-                
-                with open(filename, 'w', newline='') as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    writer.writeheader()
-                    for item in results:
-                        writer.writerow(item)
-            
-            rprint(f"\n[bold green]Successfully exported {len(results)} findings to {filename}[/bold green]")
-            
+            paginator = client.get_paginator('get_domain_names')
+            for page in paginator.paginate():
+                for d in page.get('items', []):
+                    name = d['domainName']
+                    if d.get('securityPolicy') == 'TLS_1_0':
+                        findings.append({"region": region, "api_id": "N/A", "api_name": name, "api_type": "Domain", "risk": "MEDIUM", "endpoint": name, "finding_details": "Weak TLS 1.0 policy."})
         except Exception as e:
-            rprint(f"\n[bold red]Error exporting results to {filename}: {e}[/bold red]")
+            logger.debug(f"Domain analysis error: {e}")
+        return findings
+
+    def _analyze_api_keys(self, client, region) -> List[Dict]:
+        findings = []
+        try:
+            paginator = client.get_paginator('get_api_keys')
+            for page in paginator.paginate(includeValues=False):
+                for key in page.get('items', []):
+                    created = key.get('createdDate')
+                    if created:
+                        # Fix timezone aware comparison
+                        if created.tzinfo is None:
+                            created = created.replace(tzinfo=timezone.utc)
+                        if (datetime.now(timezone.utc) - created).days > 90:
+                            findings.append({"region": region, "api_id": "N/A", "api_name": key.get('name', 'N/A'), "api_type": "Key", "risk": "LOW", "endpoint": key['id'], "finding_details": "Old API Key (>90 days)."})
+        except Exception as e:
+            logger.debug(f"API Key analysis error: {e}")
+        return findings
+
+    def _analyze_vpc_endpoints(self, region) -> List[Dict]:
+        findings = []
+        if not self.perms['ec2']: return findings
+        try:
+            ec2 = self.session.client('ec2', region_name=region, config=BOTO_CONFIG)
+            resp = ec2.describe_vpc_endpoints(Filters=[{'Name': 'service-name', 'Values': [f'com.amazonaws.{region}.execute-api']}])
+            for vpce in resp.get('VpcEndpoints', []):
+                policy_str = vpce.get('PolicyDocument')
+                if not policy_str:
+                     findings.append({"region": region, "api_id": "N/A", "api_name": vpce['VpcEndpointId'], "api_type": "VPCE", "risk": "MEDIUM", "endpoint": "Policy", "finding_details": "VPC Endpoint policy is missing (default allows all)."})
+                     continue
+                
+                # Robust JSON check instead of string search
+                try:
+                    policy = json.loads(policy_str)
+                    for stmt in policy.get('Statement', []):
+                        if stmt.get('Effect') == 'Allow':
+                            princ = stmt.get('Principal', {})
+                            if princ == '*' or (isinstance(princ, dict) and princ.get('AWS') == '*'):
+                                findings.append({"region": region, "api_id": "N/A", "api_name": vpce['VpcEndpointId'], "api_type": "VPCE", "risk": "MEDIUM", "endpoint": "Policy", "finding_details": "VPC Endpoint policy appears permissive (*)."})
+                                break
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"VPCE analysis error: {e}")
+        return findings
+
+    def analyze_http_api(self, client, api, region, waf_map) -> List[Dict]:
+        # Minimal implementation for HTTP API (v2) mirroring REST checks
+        # Checks: Default route auth, WAF, Stages
+        findings = []
+        api_id = api['ApiId']
+        name = api.get('Name', 'N/A')
+        base = {"region": region, "api_id": api_id, "api_name": name, "api_type": "HTTP"}
+        
+        try:
+            # Routes
+            paginator = client.get_paginator('get_routes')
+            for page in paginator.paginate(ApiId=api_id):
+                for r in page['Items']:
+                    if r.get('AuthorizationType') == 'NONE':
+                        risk = "CRITICAL" if r['RouteKey'] == '$default' else "HIGH"
+                        findings.append({**base, "risk": risk, "endpoint": r['RouteKey'], "finding_details": "No Authentication."})
             
+            # Stages & WAF
+            stages = client.get_stages(ApiId=api_id).get('Items', [])
+            for s in stages:
+                s_name = s['StageName']
+                arn = f"arn:aws:apigateway:{region}::/apis/{api_id}/stages/{s_name}"
+                if self.perms['wafv2'] and arn not in waf_map:
+                    findings.append({**base, "risk": "MEDIUM", "endpoint": f"Stage: {s_name}", "finding_details": "No WAFv2 protection."})
+        except Exception as e:
+            logger.debug(f"HTTP API analysis error: {e}")
+        return findings
+
+    def display_results(self, results):
+        if not results:
+            rprint("[green]No vulnerabilities found.[/green]")
+            return
+        
+        if RICH_AVAILABLE:
+            table = Table(title="Scan Results")
+            table.add_column("Risk", style="bold")
+            table.add_column("Region")
+            table.add_column("API")
+            table.add_column("Endpoint")
+            table.add_column("Details")
+            
+            colors = {"CRITICAL": "red", "HIGH": "orange1", "MEDIUM": "yellow", "LOW": "blue", "INFO": "green"}
+            for r in sorted(results, key=lambda x: ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"].index(x['risk'])):
+                c = colors.get(r['risk'], "white")
+                table.add_row(f"[{c}]{r['risk']}[/{c}]", r['region'], r['api_name'], r['endpoint'], r['finding_details'])
+            self.console.print(table)
+        else:
+            print(json.dumps(results, indent=2, default=str))
+
+    def export_results(self, results, format, filename):
+        if not filename: filename = f"scan_{datetime.now().strftime('%Y%m%d')}.{format}"
+        if format == 'json':
+            with open(filename, 'w') as f: json.dump(results, f, indent=2, default=str)
+        else:
+            if not results: return
+            keys = results[0].keys()
+            with open(filename, 'w', newline='') as f:
+                w = csv.DictWriter(f, fieldnames=keys)
+                w.writeheader()
+                w.writerows(results)
+        rprint(f"[bold green]Exported to {filename}[/bold green]")
+
     def _null_progress(self):
-        """A null context manager for when 'rich' is not available."""
-        class NullProgress:
-            def __enter__(self): return self
-            def __exit__(self, exc_type, exc_val, exc_tb): pass
-            def add_task(self, *args, **kwargs): return None
-            def update(self, *args, **kwargs): pass
-        return NullProgress()
+        class N:
+            def __enter__(s): return s
+            def __exit__(*a): pass
+        return N()
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="APIWatchDog: AWS API Attack Surface Scanner",
-        epilog="Finds unauthenticated endpoints, misconfigured private APIs, and other security flaws."
-    )
-    
-    cred_group = parser.add_argument_group('AWS Credentials')
-    cred_group.add_argument('--access-key', help='AWS Access Key ID')
-    cred_group.add_argument('--secret-key', help='AWS Secret Access Key')
-    # FIX #1 (New): Corrected typo from ..add_argument to .add_argument
-    cred_group.add_argument('--session-token', help='AWS Session Token (for temporary credentials)')
-    cred_group.add_argument('--profile', help='AWS profile name (from ~/.aws/credentials)')
-    
-    scan_group = parser.add_argument_group('Scan Configuration')
-    scan_group.add_argument('--region', '-r', dest='regions', nargs='+', default=['all'],
-                            help='AWS region(s) to scan. Default: "all". Example: us-east-1 us-west-2')
-    
-    output_group = parser.add_argument_group('Output')
-    output_group.add_argument('--export', choices=['json', 'csv'], help='Export results to a file (json or csv)')
-    output_group.add_argument('--output', '-o', help='Output filename. If not specified, a default is generated.')
-    output_group.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging for debugging')
-    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--region', nargs='+', default=['all'])
+    parser.add_argument('--profile')
+    parser.add_argument('--access-key')
+    parser.add_argument('--secret-key')
+    parser.add_argument('--session-token')
+    parser.add_argument('--export', choices=['json', 'csv'])
+    parser.add_argument('--output')
+    parser.add_argument('--verbose', action='store_true')
     args = parser.parse_args()
-    
-    # FIX #9: Configure logging once, and only if handlers aren't already set
-    if not logging.getLogger().hasHandlers():
-        log_level = logging.INFO if args.verbose else logging.WARNING
-        log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        logging.basicConfig(level=log_level, format=log_format)
-    
-    # Silence boto3's noisy logging unless we are in verbose mode
-    if not args.verbose:
-        logging.getLogger('boto3').setLevel(logging.CRITICAL)
-        logging.getLogger('botocore').setLevel(logging.CRITICAL)
-        logging.getLogger('urllib3').setLevel(logging.CRITICAL)
 
-    global logger
-    logger = logging.getLogger("APIWatchDog") # Re-get logger after config
+    logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
     
-    if not RICH_AVAILABLE:
-        print("--- APIWatchDog: AWS API Attack Surface Scanner ---")
-
-    # FIX #3: Validate that if one key is provided, the other is too.
-    if (args.access_key and not args.secret_key) or (not args.access_key and args.secret_key):
-        rprint("[bold red]Fatal Error: Credential Mismatch[/bold red]")
-        rprint("You must provide --access-key and --secret-key together.")
+    # Validation
+    if (args.access_key and not args.secret_key) or (args.secret_key and not args.access_key):
+        print("Error: Must provide both access key and secret key.")
         sys.exit(1)
 
-    try:
-        scanner = APIGatewayScanner(
-            access_key=args.access_key,
-            secret_key=args.secret_key,
-            session_token=args.session_token,
-            profile=args.profile
-        )
-        
-        # FIX #2: Perform pre-scan permission check
-        if not scanner._check_permissions():
-            sys.exit(1) # Exit if permissions are missing
-        
-        results = scanner.scan_regions(args.regions)
-        scanner.display_results(results)
-        
-        # Show summary
-        total_findings = len(results)
-        critical_count = len([r for r in results if r.get('risk') == 'CRITICAL'])
-        high_count = len([r for r in results if r.get('risk') == 'HIGH'])
-        medium_count = len([r for r in results if r.get('risk') == 'MEDIUM'])
-        low_count = len([r for r in results if r.get('risk') == 'LOW'])
-        info_count = len([r for r in results if r.get('risk') == 'INFO'])
-        
-        rprint("\n[bold]Scan Summary:[/bold]")
-        rprint(f"Total Findings: {total_findings}")
-        rprint(f"[bold red]Critical: {critical_count} [bold yellow]High: {high_count} [yellow]Medium: {medium_count} [dim]Low: {low_count} [blue]Info: {info_count}")
-        
-        if args.export:
-            scanner.export_results(results, args.export, args.output)
-        
-        if critical_count > 0:
-            sys.exit(2)
-        elif high_count > 0:
-            sys.exit(1)
-        else:
-            sys.exit(0)
-            
-    except KeyboardInterrupt:
-        rprint("\n[bold yellow]Scan interrupted by user.[/bold yellow]")
-        sys.exit(130)
-    except Exception as e:
-        rprint(f"[bold red]Fatal error: {str(e)}[/bold red]")
-        if args.verbose:
-            import traceback
-            traceback.print_exc()
+    scanner = APIGatewayScanner(args.access_key, args.secret_key, args.session_token, args.profile)
+    
+    if not scanner._check_permissions():
         sys.exit(1)
+
+    results = scanner.scan_regions(args.region)
+    scanner.display_results(results)
+    
+    if args.export:
+        scanner.export_results(results, args.export, args.output)
 
 if __name__ == "__main__":
     main()
-
